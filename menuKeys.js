@@ -3,6 +3,7 @@
 const { InlineKeyboard } = require('grammy');
 const db = require('./database');
 const { ADMIN_IDS } = require('./config');
+const { callbackButton } = require('./keyboardGuard');
 
 const EMOJI = Object.freeze({
   back: '5877468380125990242',
@@ -42,17 +43,17 @@ function getMainMenuKeyboard(userId) {
   const keyboard = new InlineKeyboard();
 
   keyboard
-    .text({ text: 'Настройки', callback_data: 'menu_settings', icon_custom_emoji_id: EMOJI.gear, style: 'primary' })
-    .text({ text: 'Подключить бота', callback_data: 'menu_connect', icon_custom_emoji_id: EMOJI.plug, style: 'primary' })
+    .add(callbackButton('Настройки', 'menu_settings', { icon_custom_emoji_id: EMOJI.gear, style: 'primary' }))
+    .add(callbackButton('Подключить бота', 'menu_connect', { icon_custom_emoji_id: EMOJI.plug, style: 'primary' }))
     .row()
-    .text({ text: 'Пригласи друга', callback_data: 'menu_ref', icon_custom_emoji_id: EMOJI.folder, style: 'primary' })
+    .add(callbackButton('Пригласи друга', 'menu_ref', { icon_custom_emoji_id: EMOJI.folder, style: 'primary' }))
     .row()
-    .text({ text: 'Подписка', callback_data: 'menu_sub', icon_custom_emoji_id: EMOJI.gem, style: 'primary' });
+    .add(callbackButton('Подписка', 'menu_sub', { icon_custom_emoji_id: EMOJI.gem, style: 'primary' }));
 
   if (isAdminUser(uid)) {
     keyboard
       .row()
-      .text({ text: 'Админ-панель', callback_data: 'menu_admin', icon_custom_emoji_id: EMOJI.crown, style: 'danger' });
+      .add(callbackButton('Админ-панель', 'menu_admin', { icon_custom_emoji_id: EMOJI.crown, style: 'danger' }));
   }
 
   return keyboard;
@@ -67,81 +68,93 @@ function getSettingsKeyboard(userId) {
   const keyboard = new InlineKeyboard();
 
   keyboard
-    .text({
-      text: `Удалённые: ${delEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
-      callback_data: 'toggle_deleted',
-      icon_custom_emoji_id: delEnabled ? EMOJI.check : EMOJI.cross,
-      style: delEnabled ? 'success' : 'danger'
-    })
+    .add(
+      callbackButton(
+        `Удалённые: ${delEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
+        'toggle_deleted',
+        {
+          icon_custom_emoji_id: delEnabled ? EMOJI.check : EMOJI.cross,
+          style: delEnabled ? 'success' : 'danger'
+        }
+      )
+    )
     .row()
-    .text({
-      text: `Изменённые: ${editEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
-      callback_data: 'toggle_edited',
-      icon_custom_emoji_id: editEnabled ? EMOJI.check : EMOJI.cross,
-      style: editEnabled ? 'success' : 'danger'
-    })
+    .add(
+      callbackButton(
+        `Изменённые: ${editEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
+        'toggle_edited',
+        {
+          icon_custom_emoji_id: editEnabled ? EMOJI.check : EMOJI.cross,
+          style: editEnabled ? 'success' : 'danger'
+        }
+      )
+    )
     .row()
-    .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 
   return keyboard;
 }
 
 function getConnectKeyboard() {
   return new InlineKeyboard()
-    .text({ text: 'Проверить подключение', callback_data: 'check_connection', icon_custom_emoji_id: EMOJI.check, style: 'success' })
+    .add(callbackButton('Проверить подключение', 'check_connection', { icon_custom_emoji_id: EMOJI.check, style: 'success' }))
     .row()
-    .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 }
 
 function getSubKeyboard() {
   return new InlineKeyboard()
-    .text({ text: '7 дней — 25 ⭐️', callback_data: 'buy_sub_7', icon_custom_emoji_id: EMOJI.gem, style: 'primary' })
-    .text({ text: '30 дней — 75 ⭐️', callback_data: 'buy_sub_30', icon_custom_emoji_id: EMOJI.gem, style: 'primary' })
+    .add(callbackButton('7 дней — 25 ⭐️', 'buy_sub_7', { icon_custom_emoji_id: EMOJI.gem, style: 'primary' }))
+    .add(callbackButton('30 дней — 75 ⭐️', 'buy_sub_30', { icon_custom_emoji_id: EMOJI.gem, style: 'primary' }))
     .row()
-    .text({ text: '90 дней — 150 ⭐️', callback_data: 'buy_sub_90', icon_custom_emoji_id: EMOJI.gem, style: 'primary' })
+    .add(callbackButton('90 дней — 150 ⭐️', 'buy_sub_90', { icon_custom_emoji_id: EMOJI.gem, style: 'primary' }))
     .row()
-    .text({ text: 'Премиум', callback_data: 'menu_premium', icon_custom_emoji_id: EMOJI.star, style: 'success' })
+    .add(callbackButton('Премиум', 'menu_premium', { icon_custom_emoji_id: EMOJI.star, style: 'success' }))
     .row()
-    .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 }
 
 function getPremiumKeyboard() {
   return new InlineKeyboard()
-    .text({ text: 'Купить Премиум — 300 ⭐️', callback_data: 'buy_sub_premium', icon_custom_emoji_id: EMOJI.star, style: 'success' })
+    .add(callbackButton('Купить Премиум — 300 ⭐️', 'buy_sub_premium', { icon_custom_emoji_id: EMOJI.star, style: 'success' }))
     .row()
-    .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 }
 
 function getRefKeyboard() {
+  // switch_inline_query и оформление собираем вручную: у switchInline()
+  // вторым аргументом идёт query, а не объект, — иначе в кнопку попадают
+  // лишние поля.
   return new InlineKeyboard()
-    .switchInline({ text: 'Поделиться ссылкой', query: '', icon_custom_emoji_id: EMOJI.plug, style: 'success' })
+    .add({ text: 'Поделиться ссылкой', switch_inline_query: '', icon_custom_emoji_id: EMOJI.plug, style: 'success' })
     .row()
-    .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 }
 
 function getImportHistoryKeyboard() {
   return new InlineKeyboard()
-    .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 }
 
 function getAdminKeyboard() {
   return new InlineKeyboard()
-    .text({ text: 'Выдать подписку', callback_data: 'admin_give_sub', icon_custom_emoji_id: EMOJI.check, style: 'success' })
-    .text({ text: 'Выдать/Снять Премиум', callback_data: 'admin_toggle_prem', icon_custom_emoji_id: EMOJI.star, style: 'success' })
+    .add(callbackButton('Выдать подписку', 'admin_give_sub', { icon_custom_emoji_id: EMOJI.check, style: 'success' }))
+    .add(callbackButton('Выдать/Снять Премиум', 'admin_toggle_prem', { icon_custom_emoji_id: EMOJI.star, style: 'success' }))
     .row()
-    .text({ text: 'Забанить юзера', callback_data: 'admin_ban_user', icon_custom_emoji_id: EMOJI.cross, style: 'danger' })
-    .text({ text: 'Разбанить юзера', callback_data: 'admin_unban_user', icon_custom_emoji_id: EMOJI.check, style: 'success' })
+    .add(callbackButton('Забанить юзера', 'admin_ban_user', { icon_custom_emoji_id: EMOJI.cross, style: 'danger' }))
+    .add(callbackButton('Разбанить юзера', 'admin_unban_user', { icon_custom_emoji_id: EMOJI.check, style: 'success' }))
     .row()
-    .text({ text: 'Забрать подписку', callback_data: 'admin_take_sub', icon_custom_emoji_id: EMOJI.cross, style: 'danger' })
-    .text({ text: 'Проверить юзера', callback_data: 'admin_check_user', icon_custom_emoji_id: EMOJI.user, style: 'primary' })
+    .add(callbackButton('Забрать подписку', 'admin_take_sub', { icon_custom_emoji_id: EMOJI.cross, style: 'danger' }))
+    .add(callbackButton('Проверить юзера', 'admin_check_user', { icon_custom_emoji_id: EMOJI.user, style: 'primary' }))
     .row()
-    .text({ text: 'Рассылка всем', callback_data: 'admin_broadcast', icon_custom_emoji_id: EMOJI.plug, style: 'primary' })
+    .add(callbackButton('Рассылка всем', 'admin_broadcast', { icon_custom_emoji_id: EMOJI.plug, style: 'primary' }))
     .row()
-    .text({ text: 'Назад в меню', callback_data: 'back_main', icon_custom_emoji_id: EMOJI.back, style: 'primary' });
+    .add(callbackButton('Назад в меню', 'back_main', { icon_custom_emoji_id: EMOJI.back, style: 'primary' }));
 }
 
 module.exports = {
   EMOJI,
+  callbackButton,
   getMainMenuKeyboard,
   getSettingsKeyboard,
   getConnectKeyboard,

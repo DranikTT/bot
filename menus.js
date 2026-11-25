@@ -7,6 +7,7 @@ const { InputFile, InlineKeyboard } = require('grammy');
 const db = require('./database');
 const { ADMIN_IDS, botInfo } = require('./config');
 const keys = require('./menuKeys');
+const { assertKeyboard } = require('./keyboardGuard');
 
 const MENU_BANNERS = Object.freeze({
   main: path.join(__dirname, 'image', 'mainmenu.jpg'),
@@ -40,6 +41,19 @@ function getUserId(value) {
   }
 
   return Number(value);
+}
+
+/**
+ * Единая точка превращения клавиатуры в reply_markup с проверкой кнопок.
+ * Любая кнопка без рабочего callback_data/действия попадёт в лог — именно
+ * такая ошибка делала все кнопки «мёртвыми».
+ */
+function toReplyMarkup(keyboard, context = 'menus') {
+  if (!keyboard) return undefined;
+
+  assertKeyboard(keyboard, context);
+
+  return keyboard;
 }
 
 function escapeHtml(text) {
@@ -220,30 +234,21 @@ function getArchiveTypesMenu(chatIdOrSession, chatTitle, selectedTypesSet) {
       const active = typeSet.has(type);
       const icon = active ? keys.EMOJI.check : keys.EMOJI.cross;
 
-      keyboard.text({
-        text: `${active ? '✅' : '❌'} ${ARCHIVE_TYPE_LABELS[type]}`,
-        callback_data: `arch_toggle_${type}`,
-        icon_custom_emoji_id: icon,
-        style: active ? 'success' : 'primary'
-      });
+      keyboard.add(
+        keys.callbackButton(
+          `${active ? '✅' : '❌'} ${ARCHIVE_TYPE_LABELS[type]}`,
+          `arch_toggle_${type}`,
+          { icon_custom_emoji_id: icon, style: active ? 'success' : 'primary' }
+        )
+      );
     }
 
     keyboard.row();
   }
 
   keyboard
-    .text({
-      text: 'Отменить экспорт',
-      callback_data: 'arch_cancel',
-      icon_custom_emoji_id: keys.EMOJI.cross,
-      style: 'danger'
-    })
-    .text({
-      text: 'Начать экспорт',
-      callback_data: 'arch_start',
-      icon_custom_emoji_id: keys.EMOJI.check,
-      style: 'success'
-    });
+    .add(keys.callbackButton('Отменить экспорт', 'arch_cancel', { icon_custom_emoji_id: keys.EMOJI.cross, style: 'danger' }))
+    .add(keys.callbackButton('Начать экспорт', 'arch_start', { icon_custom_emoji_id: keys.EMOJI.check, style: 'success' }));
 
   const displayTitle =
     title || (chatId !== undefined && chatId !== null ? `Чат #${chatId}` : 'Чат');
@@ -448,7 +453,7 @@ async function sendMenu(botOrApi, chatId, menu, options = {}) {
 
   const keyboard = menu.reply_markup || menu.keyboard;
   if (keyboard) {
-    sendOptions.reply_markup = keyboard;
+    sendOptions.reply_markup = toReplyMarkup(keyboard, `sendMenu ${menu.bannerKey || 'default'}`);
   }
 
   const bannerKey = menu.bannerKey;
@@ -531,6 +536,7 @@ module.exports = {
   getAdminMenu,
   getMenuBanner,
 
+  toReplyMarkup,
   sendMenu,
   replaceMenu
 };

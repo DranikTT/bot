@@ -24,7 +24,7 @@ const api = bot.api;
 const db = require('./database');
 const menus = require('./menus');
 const archive = require('./archive');
-const business = require('./business');
+const business = require('./bussines');
 const keys = require('./menuKeys');
 
 const NO_PREVIEW = { link_preview_options: { is_disabled: true } };
@@ -201,7 +201,7 @@ function ensureUserRecord(fromUser) {
 
 async function editOrSend(chatId, messageId, text, replyMarkup) {
   const options = { parse_mode: 'HTML', ...NO_PREVIEW };
-  if (replyMarkup) options.reply_markup = replyMarkup;
+  if (replyMarkup) options.reply_markup = menus.toReplyMarkup(replyMarkup, 'editOrSend');
   try {
     return await api.editMessageText(chatId, messageId, text, options);
   } catch (error) {
@@ -214,7 +214,7 @@ async function editOrSend(chatId, messageId, text, replyMarkup) {
 async function presentMessage(chatId, messageId, text, replyMarkup) {
   if (messageId) return editOrSend(chatId, messageId, text, replyMarkup);
   const options = { parse_mode: 'HTML', ...NO_PREVIEW };
-  if (replyMarkup) options.reply_markup = replyMarkup;
+  if (replyMarkup) options.reply_markup = menus.toReplyMarkup(replyMarkup, 'presentMessage');
   return api.sendMessage(chatId, text, options);
 }
 
@@ -311,17 +311,17 @@ async function showExportChatSelection(chatId, messageId, userId) {
   if (!chats.length) {
     const text = `<tg-emoji emoji-id="5877482652302315100">📁</tg-emoji> <b>Список чатов пуст</b>\n\nВ базе пока нет сохранённых переписок.\nПодключите бота в <b>Telegram для бизнеса → Чат-боты</b> или импортируйте историю через <code>/archive</code>.`;
     const keyboard = new InlineKeyboard()
-      .text({ text: 'Подключить бота', callback_data: 'menu_connect', icon_custom_emoji_id: keys.EMOJI.user, style: 'primary' })
+      .add(keys.callbackButton('Подключить бота', 'menu_connect', { icon_custom_emoji_id: keys.EMOJI.user, style: 'primary' }))
       .row()
-      .text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+      .add(keys.callbackButton('Назад', 'back_main', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
     return presentMessage(chatId, messageId, text, keyboard);
   }
   const keyboard = new InlineKeyboard();
   for (const chat of chats.slice(0, 35)) {
     const label = chat.username ? `${chat.title} (@${chat.username})` : chat.title;
-    keyboard.text({ text: String(label).slice(0, 48), callback_data: `arch_sel_${chat.chat_id}`, icon_custom_emoji_id: keys.EMOJI.user, style: 'primary' }).row();
+    keyboard.add(keys.callbackButton(String(label).slice(0, 48), `arch_sel_${chat.chat_id}`, { icon_custom_emoji_id: keys.EMOJI.user, style: 'primary' })).row();
   }
-  keyboard.text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+  keyboard.add(keys.callbackButton('Назад', 'back_main', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
   return presentMessage(chatId, messageId, `<tg-emoji emoji-id="5877482652302315100">📁</tg-emoji> <b>Выберите чат для создания HTML-архива:</b>\n\nНайдено диалогов: <b>${chats.length}</b>`, keyboard);
 }
 
@@ -496,13 +496,13 @@ async function importArchiveDocument(message, userId) {
     }
     const importedCount = await archive.importTelegramDesktopExport(jsonPath, db, userId, { mediaDir: MEDIA_DIR || path.join(__dirname, 'media'), maxMediaBytes: Number(config.MAX_IMPORTED_MEDIA_MB || 100) * 1024 * 1024 });
     userStates.delete(userId);
-    const keyboard = new InlineKeyboard().text({ text: 'Назад в меню', callback_data: 'back_main', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+    const keyboard = new InlineKeyboard().add(keys.callbackButton('Назад в меню', 'back_main', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
     return editOrSend(chatId, waitMessage.message_id, `<tg-emoji emoji-id="5776375003280838798">✅</tg-emoji> <b>Импорт переписки успешно завершён!</b>\n\n• Добавлено сообщений: <b>${Number(importedCount) || 0}</b>\n\nДля создания HTML-архива используйте команду <code>/export</code>.`, keyboard);
   } catch (error) {
     userStates.delete(userId);
     const keyboard = new InlineKeyboard()
-      .text({ text: 'Повторить импорт', callback_data: 'archive_import_again', style: 'primary' }).row()
-      .text({ text: 'Назад в меню', callback_data: 'back_main', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+      .add(keys.callbackButton('Повторить импорт', 'archive_import_again', { style: 'primary' })).row()
+      .add(keys.callbackButton('Назад в меню', 'back_main', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
     return editOrSend(chatId, waitMessage.message_id, `<tg-emoji emoji-id="5778527486270770928">❌</tg-emoji> <b>Ошибка импорта:</b> <code>${escapeHtml(error.message)}</code>`, keyboard);
   } finally {
     await removeDirectory(tempRoot);
@@ -669,7 +669,7 @@ bot.command('archive', async (ctx) => {
     const user = ensureUserRecord(message.from);
     if (isBanned(user) && !isAdmin(userId)) return sendHtml(message.chat.id, '🚫 Ваш аккаунт заблокирован.');
     userStates.set(userId, { action: 'archive_wait_file' });
-    const keyboard = new InlineKeyboard().text({ text: 'Отмена', callback_data: 'archive_import_cancel', style: 'danger' });
+    const keyboard = new InlineKeyboard().add(keys.callbackButton('Отмена', 'archive_import_cancel', { style: 'danger' }));
     return sendHtml(message.chat.id, `<tg-emoji emoji-id="5877482652302315100">📥</tg-emoji> <b>Импорт истории Telegram Desktop</b>\n\nОтправьте следующим сообщением файл <code>result.json</code> или ZIP-архив экспорта Telegram Desktop.`, { reply_markup: keyboard });
   } catch (error) {
     console.error('[/archive Error]:', error);
@@ -702,7 +702,7 @@ bot.on('inline_query', async (ctx) => {
         message_text: `<tg-emoji emoji-id="5994750571041525522">👋</tg-emoji> Привет! Я пользуюсь бизнес-ботом для перехвата удалённых, изменённых и сгорающих сообщений в Telegram.\n\n<tg-emoji emoji-id="5879785854284599288">🎁</tg-emoji> Переходи по моей ссылке и забирай <b>+3 дня подписки бесплатно</b>:\n${refLink}`,
         parse_mode: 'HTML'
       },
-      reply_markup: new InlineKeyboard().url({ text: '🚀 Подключить бота (+3 дня)', url: refLink })
+      reply_markup: new InlineKeyboard().url('🚀 Подключить бота (+3 дня)', refLink)
     }];
     await ctx.answerInlineQuery(results, { cache_time: 5, is_personal: true });
   } catch (_) {}
@@ -764,7 +764,7 @@ bot.on('callback_query:data', async (ctx) => {
       return ctx.answerCallbackQuery();
     }
     if (data === 'menu_import_history') {
-      const keyboard = new InlineKeyboard().text({ text: 'Назад', callback_data: 'back_main', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+      const keyboard = new InlineKeyboard().add(keys.callbackButton('Назад', 'back_main', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
       await editOrSend(chatId, messageId, `Для импорта истории отправьте команду <code>/archive</code>, затем загрузите JSON/ZIP.`, keyboard);
       return ctx.answerCallbackQuery();
     }
@@ -801,7 +801,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     if (data === 'archive_import_again') {
       userStates.set(userId, { action: 'archive_wait_file' });
-      const keyboard = new InlineKeyboard().text({ text: 'Отмена', callback_data: 'archive_import_cancel', style: 'danger' });
+      const keyboard = new InlineKeyboard().add(keys.callbackButton('Отмена', 'archive_import_cancel', { style: 'danger' }));
       await editOrSend(chatId, messageId, `Отправьте JSON или ZIP-архив экспорта Telegram Desktop.`, keyboard);
       return ctx.answerCallbackQuery();
     }
@@ -868,7 +868,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     if (data.startsWith('admin_')) {
       if (!isAdmin(userId)) return ctx.answerCallbackQuery({ text: '⛔️ Нет доступа.', show_alert: true });
-      const backAdminKeyboard = new InlineKeyboard().text({ text: 'Назад в админ-панель', callback_data: 'menu_admin', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+      const backAdminKeyboard = new InlineKeyboard().add(keys.callbackButton('Назад в админ-панель', 'menu_admin', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
       if (data === 'admin_give_sub') {
         adminStates.set(userId, { action: 'give_sub' });
         await editOrSend(chatId, messageId, `➕ <b>Выдача подписки</b>\n\nОтправьте ID и количество дней через пробел:`, backAdminKeyboard);
@@ -926,7 +926,7 @@ bot.on('message', async (ctx) => {
     }
     const adminState = adminStates.get(userId);
     if (adminState && isAdmin(userId)) {
-      const backAdminKeyboard = new InlineKeyboard().text({ text: 'В админ-панель', callback_data: 'menu_admin', icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' });
+      const backAdminKeyboard = new InlineKeyboard().add(keys.callbackButton('В админ-панель', 'menu_admin', { icon_custom_emoji_id: keys.EMOJI.back, style: 'primary' }));
       if (adminState.action === 'give_sub' && message.text) {
         const parts = message.text.trim().split(/\s+/);
         const targetId = Number(parts[0]);
