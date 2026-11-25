@@ -353,6 +353,80 @@ public final class FakeTelegramTest {
             assertEquals("test_cb", button.get("callback_data"));
         });
 
+        // --- поведение при отсутствии права на кастомные эмодзи ---
+        // Ровно то, что было в проде: Telegram отвечает DOCUMENT_INVALID
+        // на текст с <tg-emoji>, меню должно уйти с обычными эмодзи.
+
+        Emoji.resetForTests();
+        fake.rejectCustomEmoji(true);
+        fake.reset();
+
+        handler.handle(update("message", message(5101, 9001, "/start")));
+
+        check("Без права: меню всё равно доставлено", () -> {
+            int sent = apiCalls(fake, "sendPhoto") + apiCalls(fake, "sendMessage");
+            assertTrue(sent > 0, "меню не отправлено ни одним способом");
+        });
+
+        check("Без права: ошибок наружу не вылетело", () ->
+                assertEquals(0, fake.errors().size()));
+
+        check("Без права: флаг эмодзи снят", () ->
+                assertFalse(Emoji.isAllowed(), "флаг остался включённым"));
+
+        check("Без права: в отправленном нет <tg-emoji>", () -> {
+            String text = fake.lastText();
+            assertFalse(text.contains("<tg-emoji"),
+                    "кастомные эмодзи так и остались: " + text);
+            assertTrue(text.contains("Привет"), "текст меню потерялся");
+        });
+
+        check("Без права: кнопки рабочие, но без иконок", () -> {
+            String sent = Json.write(fake.callsOf("sendMessage"));
+            assertTrue(sent.contains("tariffs"), "кнопки потерялись");
+            assertFalse(sent.contains("icon_custom_emoji_id"), "иконки остались");
+        });
+
+        check("Без права: повторный клик работает", () -> {
+            int before = fake.callsOf("sendMessage").size() + fake.callsOf("sendPhoto").size();
+            handler.handle(update("callback_query", callback(6101, "tariffs", 9001)));
+            int after = fake.callsOf("sendMessage").size() + fake.callsOf("sendPhoto").size();
+            assertTrue(after > before, "на клик нет ответа");
+        });
+
+        fake.rejectCustomEmoji(false);
+        Emoji.resetForTests();
+
+        // --- нередактируемое сообщение (старое меню с фото) ---
+        check("Нет текста для правки: отправляется новое", () -> {
+            fake.reset();
+            fake.markNoText(9999);
+
+            int before = fake.callsOf("sendMessage").size() + fake.callsOf("sendPhoto").size();
+            handler.handle(update("callback_query", callback(9999, "settings", 9001)));
+            int after = fake.callsOf("sendMessage").size() + fake.callsOf("sendPhoto").size();
+
+            assertTrue(after > before, "новое сообщение не отправлено");
+            assertTrue(fake.lastText().contains("Настройки"), "меню настроек не показано");
+        });
+
+        check("Нет текста для правки: try/catch не пропускает ошибку наружу", () ->
+                assertEquals(0, fake.errors().size()));
+
+        // --- stripHtml ---
+        check("stripHtml: убирает теги, оставляет эмодзи", () -> {
+            String html = "Привет " + Emoji.html("wave", "👋") + " и " + Emoji.html("gem", "💎");
+            String plain = Emoji.stripHtml(html);
+            assertFalse(plain.contains("tg-emoji"), "тег остался: " + plain);
+            assertTrue(plain.contains("👋") && plain.contains("💎"), "эмодзи пропали: " + plain);
+        });
+
+        check("stripHtml: текст без тегов не меняется", () ->
+                assertEquals("обычный текст", Emoji.stripHtml("обычный текст")));
+
+        check("stripHtml: null безопасен", () ->
+                assertEquals(null, Emoji.stripHtml(null)));
+
         // --- итог ---
         System.out.println();
         System.out.println("────────────────────────────────────────");

@@ -27,7 +27,13 @@ public final class FakeTelegram {
     private final Map<String, List<Map<String, Object>>> calls = new ConcurrentHashMap<>();
     private final List<Map<String, Object>> queue = Collections.synchronizedList(new ArrayList<>());
     private final AtomicLong messageCounter = new AtomicLong(1000);
+    /** Сообщения, у которых нет текста (фото) — редактировать нельзя. */
+    private final java.util.Set<Long> noTextMessages =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final List<String> errors = Collections.synchronizedList(new ArrayList<>());
+    /** Когда true — сервер ведёт себя как Telegram без права на эмодзи. */
+    private volatile boolean rejectCustomEmoji = false;
+
     /** Хронологический журнал: метод + payload, в порядке поступления. */
     private final List<Map.Entry<String, Map<String, Object>>> timeline =
             Collections.synchronizedList(new ArrayList<>());
@@ -48,6 +54,15 @@ public final class FakeTelegram {
 
     public void stop() {
         server.stop(0);
+    }
+
+    /**
+     * Включает поведение «у бота нет права на кастомные эмодзи»:
+     * любой {@code <tg-emoji>} или {@code icon_custom_emoji_id} даёт
+     * 400 DOCUMENT_INVALID на всё сообщение.
+     */
+    public void rejectCustomEmoji(boolean reject) {
+        this.rejectCustomEmoji = reject;
     }
 
     public void pushUpdate(Map<String, Object> update) {
@@ -74,6 +89,12 @@ public final class FakeTelegram {
         calls.clear();
         errors.clear();
         timeline.clear();
+        noTextMessages.clear();
+    }
+
+    /** Помечает сообщение как «без текста» (старое меню с баннером). */
+    public void markNoText(long messageId) {
+        noTextMessages.add(messageId);
     }
 
     /** Хронологический журнал вызовов. */
@@ -121,6 +142,10 @@ public final class FakeTelegram {
                     .add(payload);
             timeline.add(new java.util.AbstractMap.SimpleEntry<>(method, payload));
 
+            if (rejectCustomEmoji && hasCustomEmoji(payload)) {
+                throw new IllegalStateException("Bad Request: DOCUMENT_INVALID");
+            }
+
             Object result = switchMethod(method, payload);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("ok", true);
@@ -135,6 +160,16 @@ public final class FakeTelegram {
             response.put("description", String.valueOf(error.getMessage()));
             respond(exchange, 400, Json.write(response));
         }
+    }
+
+    /**
+     * Есть ли в запросе кастомные эмодзи — в тексте, подписи или кнопках.
+     * Ищем по сериализованному виду, чтобы поймать и multipart-поля.
+     */
+    private static boolean hasCustomEmoji(Map<String, Object> payload) {
+        String serialized = Json.write(payload);
+        return serialized.contains("<tg-emoji")
+                || serialized.contains("icon_custom_emoji_id");
     }
 
     private Object switchMethod(String method, Map<String, Object> payload) {
@@ -179,6 +214,14 @@ public final class FakeTelegram {
                 return message;
             }
             case "editMessageText":
+                if (noTextMessages.contains(Json.getLong(payload, "message_id", 0))) {
+                    // так Telegram отвечает, когда под кнопками фото, а не текст
+                    throw new IllegalStateException(
+                            "Bad Request: there is no text in the message to edit");
+                }
+                return Map.of("message_id", Json.getLong(payload, "message_id", 0),
+                        "chat", Map.of("id", Json.getLong(payload, "chat_id", 0), "type", "private"),
+                        "date", System.currentTimeMillis() / 1000);
             case "editMessageMedia":
                 return Map.of("message_id", Json.getLong(payload, "message_id", 0),
                         "chat", Map.of("id", Json.getLong(payload, "chat_id", 0), "type", "private"),

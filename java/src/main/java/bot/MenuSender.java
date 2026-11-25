@@ -87,10 +87,11 @@ public final class MenuSender {
             api.editMessageText(chatId, messageId, menu.text(), keyboard);
             return true;
         } catch (TelegramApi.TelegramException error) {
-            if (error.isMessageNotModified()) {
-                return true;
-            }
-            if (error.isMessageToEditNotFound()) {
+            if (error.isNotEditable()) {
+                // «there is no text in the message to edit» — под кнопками
+                // старое меню с фото. Править нечего, отправляем новое.
+                LOG.fine("editMessageText: сообщение не редактируется ("
+                        + error.description() + "), отправляю новое");
                 return false;
             }
             LOG.fine("editMessageText: " + error.getMessage());
@@ -135,25 +136,8 @@ public final class MenuSender {
             }
         }
 
-        try {
-            api.sendMessage(chatId, menu.text(), menu.keyboard(), businessConnectionId, true);
-        } catch (TelegramApi.TelegramException error) {
-            // Если Telegram не принял кастомные эмодзи в кнопках — повторяем без них
-            if (isEmojiError(error) && menu.keyboard() != null) {
-                LOG.warning("[sendMenu] Кастомные эмодзи отклонены, повтор без них");
-                api.sendMessage(chatId, menu.text(),
-                        Keyboard.stripEmojis(menu.keyboard()), businessConnectionId, true);
-                return;
-            }
-            throw error;
-        }
-    }
-
-    private static boolean isEmojiError(TelegramApi.TelegramException error) {
-        String text = error.description() == null ? "" : error.description().toUpperCase();
-        return text.contains("CUSTOM_EMOJI")
-                || text.contains("BUTTON_ICON")
-                || text.contains("DOCUMENT_INVALID");
+        // sendMessage сам снимет кастомные эмодзи, если у бота нет права
+        api.sendMessage(chatId, menu.text(), menu.keyboard(), businessConnectionId, true);
     }
 
     /** Отправляет простое сообщение с клавиатурой. */

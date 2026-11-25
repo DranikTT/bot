@@ -64,8 +64,21 @@ public final class Keyboard {
         return markup;
     }
 
-    /** Копия клавиатуры без кастомных эмодзи — запасной вариант. */
-    public static Map<String, Object> stripEmojis(Map<String, Object> markup) {
+    /**
+     * Копия клавиатуры без кастомных эмодзи — запасной вариант,
+     * когда Telegram не даёт боту их показывать.
+     *
+     * Принимает Object, потому что клавиатура в запросе может быть null.
+     */
+    @SuppressWarnings("unchecked")
+    public static Object stripEmojis(Object rawMarkup) {
+        if (!(rawMarkup instanceof Map)) {
+            return null;
+        }
+        return stripEmojisMap((Map<String, Object>) rawMarkup);
+    }
+
+    public static Map<String, Object> stripEmojisMap(Map<String, Object> markup) {
         Map<String, Object> result = new LinkedHashMap<>();
         List<List<Map<String, Object>>> plainRows = new ArrayList<>();
 

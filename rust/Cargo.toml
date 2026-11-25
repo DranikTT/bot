@@ -1,0 +1,15 @@
+[package]
+name = "savemod_bot"
+version = "1.0.0"
+edition = "2021"
+description = "Telegram Business bot: перехват удалённых/изменённых сообщений, HTML-архивы"
+
+# Никаких внешних крейтов: только std.
+# HTTPS идёт через libcurl (системная библиотека) — см. src/http.rs.
+[dependencies]
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+strip = true
+lto = false

@@ -45,6 +45,8 @@ public final class Config {
     public final long maxImportedMediaMb;
     public final long maxSingleMediaMb;
     public final long maxExportMb;
+    /** Разрешены ли кастомные эмодзи (CUSTOM_EMOJI=on|off). */
+    public final boolean customEmoji;
 
     private Config(Env env) {
         this.botToken = env.require("BOT_TOKEN");
@@ -56,6 +58,10 @@ public final class Config {
         this.maxSingleMediaMb = env.getLong("MAX_SINGLE_MEDIA_MB", 35);
         this.maxImportFileMb = env.getLong("MAX_IMPORT_FILE_MB", 200);
         this.maxImportedMediaMb = env.getLong("MAX_IMPORTED_MEDIA_MB", 100);
+        this.customEmoji = !"off".equalsIgnoreCase(env.get("CUSTOM_EMOJI", "on").trim());
+        if (!customEmoji) {
+            Emoji.disableByConfig();
+        }
     }
 
     public static Config load() {

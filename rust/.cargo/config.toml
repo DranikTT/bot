@@ -1,0 +1,8 @@
+# Сборка без внешних крейтов: сеть не нужна.
+[net]
+offline = false
+
+# На VPS с обычным OpenSSL/libcurl ничего настраивать не нужно.
+# Если libcurl лежит нестандартно, укажите каталог:
+# [env]
+# LIBRARY_PATH = "/usr/local/lib"

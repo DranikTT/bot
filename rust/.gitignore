@@ -1,0 +1,4 @@
+/target/
+bot_database.json
+bot_database.json.tmp
+temp/

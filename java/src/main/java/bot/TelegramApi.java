@@ -210,15 +210,46 @@ public final class TelegramApi {
 
     public Map<String, Object> sendMessage(long chatId, String text, Object keyboard,
                                            String businessConnectionId, boolean noPreview) {
+        return sendMessageSafe(chatId, text, keyboard, businessConnectionId, noPreview);
+    }
+
+    /**
+     * Отправка с автоматическим фолбэком на обычные эмодзи.
+     *
+     * Если у бота нет права на кастомные эмодзи, Telegram отвечает
+     * {@code 400: DOCUMENT_INVALID} и отклоняет сообщение целиком.
+     * Раньше бот в этом случае просто падал, и пользователь не видел меню.
+     * Теперь тег {@code <tg-emoji>} снимается, иконки кнопок убираются,
+     * и сообщение уходит со второго раза — уже с обычными эмодзи.
+     */
+    public Map<String, Object> sendMessageSafe(long chatId, String text, Object keyboard,
+                                               String businessConnectionId, boolean noPreview) {
+        try {
+            return sendMessageOnce(chatId, text, keyboard, businessConnectionId, noPreview, true);
+        } catch (TelegramException error) {
+            if (!isCustomEmojiError(error)) {
+                throw error;
+            }
+            Emoji.markNotAllowed();
+            LOG.warning("[sendMessage] Кастомные эмодзи недоступны ("
+                    + error.description() + ") — отправляю с обычными");
+            return sendMessageOnce(chatId, text, keyboard, businessConnectionId, noPreview, false);
+        }
+    }
+
+    private Map<String, Object> sendMessageOnce(long chatId, String text, Object keyboard,
+                                                String businessConnectionId, boolean noPreview,
+                                                boolean withEmoji) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("chat_id", chatId);
-        payload.put("text", text);
+        payload.put("text", withEmoji ? text : Emoji.stripHtml(text));
         payload.put("parse_mode", "HTML");
         if (noPreview) {
             payload.put("link_preview_options", Map.of("is_disabled", true));
         }
-        if (keyboard != null) {
-            payload.put("reply_markup", keyboard);
+        Object markup = withEmoji ? keyboard : Keyboard.stripEmojis(keyboard);
+        if (markup != null) {
+            payload.put("reply_markup", markup);
         }
         if (businessConnectionId != null) {
             payload.put("business_connection_id", businessConnectionId);
@@ -226,45 +257,110 @@ public final class TelegramApi {
         return callJson("sendMessage", payload);
     }
 
+    /** Это ошибка из-за кастомных эмодзи (нет права / неизвестный ID)? */
+    static boolean isCustomEmojiError(TelegramException error) {
+        String text = error.description() == null ? "" : error.description().toUpperCase();
+        return error.code() == 400
+                && (text.contains("DOCUMENT_INVALID")
+                || text.contains("CUSTOM_EMOJI")
+                || text.contains("BUTTON_ICON"));
+    }
+
     public Map<String, Object> editMessageText(long chatId, long messageId, String text, Object keyboard) {
+        try {
+            return editMessageTextOnce(chatId, messageId, text, keyboard, true);
+        } catch (TelegramException error) {
+            if (!isCustomEmojiError(error)) {
+                throw error;
+            }
+            Emoji.markNotAllowed();
+            LOG.warning("[editMessageText] Кастомные эмодзи недоступны — правлю с обычными");
+            return editMessageTextOnce(chatId, messageId, text, keyboard, false);
+        }
+    }
+
+    private Map<String, Object> editMessageTextOnce(long chatId, long messageId, String text,
+                                                    Object keyboard, boolean withEmoji) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("chat_id", chatId);
         payload.put("message_id", messageId);
-        payload.put("text", text);
+        payload.put("text", withEmoji ? text : Emoji.stripHtml(text));
         payload.put("parse_mode", "HTML");
         payload.put("link_preview_options", Map.of("is_disabled", true));
-        if (keyboard != null) {
-            payload.put("reply_markup", keyboard);
+        Object markup = withEmoji ? keyboard : Keyboard.stripEmojis(keyboard);
+        if (markup != null) {
+            payload.put("reply_markup", markup);
         }
         return callJson("editMessageText", payload);
     }
 
     public Map<String, Object> sendPhoto(long chatId, Path photo, String caption, Object keyboard)
             throws IOException {
+        try {
+            return sendPhotoOnce(chatId, photo, caption, keyboard, true);
+        } catch (TelegramException | IOException error) {
+            TelegramException telegramError = asTelegramError(error);
+            if (telegramError == null || !isCustomEmojiError(telegramError)) {
+                throw error;
+            }
+            Emoji.markNotAllowed();
+            LOG.warning("[sendPhoto] Кастомные эмодзи недоступны — подпись с обычными");
+            return sendPhotoOnce(chatId, photo, caption, keyboard, false);
+        }
+    }
+
+    private Map<String, Object> sendPhotoOnce(long chatId, Path photo, String caption,
+                                              Object keyboard, boolean withEmoji) throws IOException {
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("chat_id", chatId);
-        fields.put("caption", caption);
+        fields.put("caption", withEmoji ? caption : Emoji.stripHtml(caption));
         fields.put("parse_mode", "HTML");
-        if (keyboard != null) {
-            fields.put("reply_markup", keyboard);
+        Object markup = withEmoji ? keyboard : Keyboard.stripEmojis(keyboard);
+        if (markup != null) {
+            fields.put("reply_markup", markup);
         }
         return callMultipart("sendPhoto", fields, "photo", photo);
     }
 
+    private static TelegramException asTelegramError(Throwable error) {
+        if (error instanceof TelegramException) {
+            return (TelegramException) error;
+        }
+        Throwable cause = error.getCause();
+        return cause instanceof TelegramException ? (TelegramException) cause : null;
+    }
+
     public Map<String, Object> editMessageMedia(long chatId, long messageId, Path photo,
                                                 String caption, Object keyboard) throws IOException {
+        try {
+            return editMessageMediaOnce(chatId, messageId, photo, caption, keyboard, true);
+        } catch (TelegramException | IOException error) {
+            TelegramException telegramError = asTelegramError(error);
+            if (telegramError == null || !isCustomEmojiError(telegramError)) {
+                throw error;
+            }
+            Emoji.markNotAllowed();
+            LOG.warning("[editMessageMedia] Кастомные эмодзи недоступны — правлю с обычными");
+            return editMessageMediaOnce(chatId, messageId, photo, caption, keyboard, false);
+        }
+    }
+
+    private Map<String, Object> editMessageMediaOnce(long chatId, long messageId, Path photo,
+                                                     String caption, Object keyboard,
+                                                     boolean withEmoji) throws IOException {
         Map<String, Object> media = new LinkedHashMap<>();
         media.put("type", "photo");
         media.put("media", "attach://photo");
-        media.put("caption", caption);
+        media.put("caption", withEmoji ? caption : Emoji.stripHtml(caption));
         media.put("parse_mode", "HTML");
 
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("chat_id", chatId);
         fields.put("message_id", messageId);
         fields.put("media", media);
-        if (keyboard != null) {
-            fields.put("reply_markup", keyboard);
+        Object markup = withEmoji ? keyboard : Keyboard.stripEmojis(keyboard);
+        if (markup != null) {
+            fields.put("reply_markup", markup);
         }
         return callMultipart("editMessageMedia", fields, "photo", photo);
     }
@@ -274,18 +370,33 @@ public final class TelegramApi {
         Path temp = Files.createTempFile("doc", ".bin");
         try {
             Files.write(temp, content);
-            Map<String, Object> fields = new LinkedHashMap<>();
-            fields.put("chat_id", chatId);
-            fields.put("caption", caption);
-            fields.put("parse_mode", "HTML");
-            if (keyboard != null) {
-                fields.put("reply_markup", keyboard);
+            try {
+                return sendDocumentOnce(chatId, temp, caption, keyboard, true);
+            } catch (TelegramException | IOException error) {
+                TelegramException telegramError = asTelegramError(error);
+                if (telegramError == null || !isCustomEmojiError(telegramError)) {
+                    throw error;
+                }
+                Emoji.markNotAllowed();
+                LOG.warning("[sendDocument] Кастомные эмодзи недоступны — подпись с обычными");
+                return sendDocumentOnce(chatId, temp, caption, keyboard, false);
             }
-            Map<String, Object> result = callMultipart("sendDocument", fields, "document", temp);
-            return result;
         } finally {
             Files.deleteIfExists(temp);
         }
+    }
+
+    private Map<String, Object> sendDocumentOnce(long chatId, Path temp, String caption,
+                                                 Object keyboard, boolean withEmoji) throws IOException {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("chat_id", chatId);
+        fields.put("caption", withEmoji ? caption : Emoji.stripHtml(caption));
+        fields.put("parse_mode", "HTML");
+        Object markup = withEmoji ? keyboard : Keyboard.stripEmojis(keyboard);
+        if (markup != null) {
+            fields.put("reply_markup", markup);
+        }
+        return callMultipart("sendDocument", fields, "document", temp);
     }
 
     public void answerCallbackQuery(String callbackId, String text, boolean alert) {
@@ -412,9 +523,21 @@ public final class TelegramApi {
         }
 
         public boolean isMessageToEditNotFound() {
-            return description != null
-                    && (description.toLowerCase().contains("message to edit not found")
-                    || description.toLowerCase().contains("message can't be edited"));
+            String text = description == null ? "" : description.toLowerCase();
+            return text.contains("message to edit not found")
+                    || text.contains("message can't be edited");
+        }
+
+        /**
+         * Сообщение не текст (например, старое меню с баннером) либо его
+         * уже нет — значит, редактировать нельзя, нужно отправить новое.
+         */
+        public boolean isNotEditable() {
+            String text = description == null ? "" : description.toLowerCase();
+            return text.contains("there is no text in the message to edit")
+                    || text.contains("message can't be edited")
+                    || text.contains("message to edit not found")
+                    || text.contains("message is not modified");
         }
     }
 }
