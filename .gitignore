@@ -1,12 +1,21 @@
+# Java
+java/build/
+*.class
+
+# Python (старые артефакты)
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Секреты и данные
 .env
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
 media_cache/
 temp/
+
+# Кэши инструментов
 .pytest_cache/
 .ruff_cache/
