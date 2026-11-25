@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Bot } = require('grammy');
 const { run, sequentialize } = require('@grammyjs/runner');
+const { assertKeyboard } = require('./keyboardGuard');
 
 (function loadEnv() {
   const envPath = path.join(__dirname, '.env');
@@ -122,8 +123,14 @@ function stripTextEmojis(payload) {
   return result;
 }
 
-bot.api.config.use(async (prev, method, payload, signal) => {
-  let response = await prev(method, payload, signal);
+bot.api.config.use(async (prev, method, payload) => {
+  // Ловим битые клавиатуры ДО запроса к Telegram: именно из-за них кнопки
+  // перестают реагировать (callback_data подменяется текстом кнопки).
+  if (payload && payload.reply_markup) {
+    assertKeyboard(payload.reply_markup, `${method} reply_markup`);
+  }
+
+  let response = await prev(method, payload);
 
   if (response.ok || !RETRY_METHODS.has(method)) return response;
   if (!RETRYABLE_ERROR.test(response.description || '')) return response;
@@ -143,7 +150,7 @@ bot.api.config.use(async (prev, method, payload, signal) => {
 
     if (variant.text) next = stripTextEmojis(next);
 
-    response = await prev(method, next, signal);
+    response = await prev(method, next);
 
     if (response.ok || !RETRYABLE_ERROR.test(response.description || '')) {
       return response;
