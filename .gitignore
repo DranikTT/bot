@@ -19,3 +19,5 @@ temp/
 # Кэши инструментов
 .pytest_cache/
 .ruff_cache/
+js/node_modules/
+js/bot_database.sqlite*
