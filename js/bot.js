@@ -594,6 +594,17 @@ async function handleSuccessfulPayment(message) {
   return menus.sendMenu(bot, message.chat.id, mainMenu);
 }
 
+// DEBUG=true в .env — печатаем каждое обновление, чтобы видеть,
+// доходят ли события Business и что именно приходит от Telegram.
+if (config.DEBUG) {
+  bot.use(async (ctx, next) => {
+    const kind = Object.keys(ctx.update).find((key) => key !== 'update_id');
+    const from = ctx.from ? ` от ${ctx.from.id}` : '';
+    console.log(`[DEBUG] update ${ctx.update.update_id}: ${kind}${from}`);
+    return next();
+  });
+}
+
 business.registerBusinessHandlers();
 
 bot.on('pre_checkout_query', async (ctx) => {

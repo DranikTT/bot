@@ -6,8 +6,19 @@ const { Bot } = require('grammy');
 const { run, sequentialize } = require('@grammyjs/runner');
 
 (function loadEnv() {
-  const envPath = path.join(__dirname, '.env');
-  if (!fs.existsSync(envPath)) return;
+  // .env ищем в двух местах: рядом с кодом (js/.env) и в корне проекта
+  // (../.env). Раньше смотрели только рядом с кодом, поэтому .env,
+  // положенный по инструкции в корень, молча не читался и бот падал
+  // с «Не задан BOT_TOKEN».
+  const candidates = [
+    path.join(__dirname, '.env'),
+    path.join(__dirname, '..', '.env')
+  ];
+
+  const envPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!envPath) return;
+
+  console.log(`Конфигурация: ${envPath}`);
 
   for (const rawLine of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -45,10 +56,20 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
 
 const SUB_PRICES = { days7: 25, days30: 75, days90: 150, premium: 300 };
 
+// DEBUG=true — подробный лог входящих обновлений и вызовов API
+const DEBUG = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG || '').trim());
+
 const MAX_EXPORT_MB = envNumber('MAX_EXPORT_MB', 48);
 const MAX_SINGLE_MEDIA_MB = envNumber('MAX_SINGLE_MEDIA_MB', 35);
-const MAX_IMPORT_MB = envNumber('MAX_IMPORT_MB', 50);
-const MAX_IMPORT_FILE_MB = envNumber('MAX_IMPORT_FILE_MB', 200);
+// MAX_IMPORT_MB — устаревшее имя лимита импорта. Действует
+// MAX_IMPORT_FILE_MB (по умолчанию 200). Если задан только старый ключ,
+// подхватываем его, чтобы старые .env не теряли настройку.
+const MAX_IMPORT_MB = envNumber('MAX_IMPORT_MB', 0);
+const MAX_IMPORT_FILE_MB = envNumber(
+  process.env.MAX_IMPORT_FILE_MB ? 'MAX_IMPORT_FILE_MB' : 'MAX_IMPORT_MB',
+  MAX_IMPORT_MB || 200
+);
+
 const MAX_IMPORTED_MEDIA_MB = envNumber('MAX_IMPORTED_MEDIA_MB', 100);
 
 const MEDIA_DIR = path.join(__dirname, 'media_cache');
@@ -94,10 +115,17 @@ const RETRY_METHODS = new Set([
   'sendMediaGroup'
 ]);
 
+// CUSTOM_EMOJI=off в .env принудительно отключает кастомные эмодзи:
+// без этого флага переменная из конфига ничего не делала.
+// По умолчанию эмодзи включены (нужен Premium у владельца бота).
+const CUSTOM_EMOJI_ENABLED = !/^(0|false|no|off)$/i.test(
+  String(process.env.CUSTOM_EMOJI || '').trim()
+);
+
 // Если Telegram один раз отказал на кастомные эмодзи — он откажет и дальше
 // (право на них не появляется «на лету»). Кэшируем отказ, чтобы не делать
 // по три неудачных попытки на каждый экран: меню уходит сразу без эмодзи.
-let customEmojiAllowed = true;
+let customEmojiAllowed = CUSTOM_EMOJI_ENABLED;
 
 function stripKeyboardEmojis(markup) {
   let value = markup;
@@ -143,7 +171,7 @@ function stripTextEmojis(payload) {
 }
 
 bot.api.config.use(async (prev, method, payload, signal) => {
-  // эмодзи уже отключены — сразу отправляем чистый вариант
+  // эмодзи отключены (конфигом или прошлым отказом) — сразу чистый вариант
   let current = payload;
 
   if (!customEmojiAllowed && RETRY_METHODS.has(method)) {
@@ -309,10 +337,12 @@ async function stopBot() {
 module.exports = {
   bot,
   botInfo,
+  DEBUG,
   API_BASE,
+  CUSTOM_EMOJI_ENABLED,
   isCustomEmojiAllowed: () => customEmojiAllowed,
   resetCustomEmojiCache: () => {
-    customEmojiAllowed = true;
+    customEmojiAllowed = CUSTOM_EMOJI_ENABLED;
   },
   BOT_TOKEN,
   ADMIN_IDS,
