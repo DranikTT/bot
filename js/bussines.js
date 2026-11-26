@@ -346,7 +346,19 @@ function extractMediaMeta(message) {
 async function onBusinessConnection(ctx) {
   try {
     const conn = ctx.businessConnection;
-    const ownerId = conn.user_id;
+
+    // В Telegram поле называется user_chat_id (id личного чата владельца).
+    // Раньше читали conn.user_id — его не существует, владелец выходил
+    // undefined, и подключение записывалось в никуда.
+    const ownerId = Number(
+      conn.user_chat_id || (conn.user && conn.user.id) || 0
+    );
+
+    if (!ownerId) {
+      console.error('[Business Connection] не удалось определить владельца:', conn);
+      return;
+    }
+
     const connectionId = conn.id;
     const isEnabledFlag = conn.is_enabled ? 1 : 0;
 
@@ -362,8 +374,117 @@ async function onBusinessConnection(ctx) {
     console.log(
       `[Business Connection] Обновлен статус для ${ownerId}: ID=${connectionId}, Active=${isEnabledFlag}`
     );
+
+    // Подключение меняется владельцем в настройках, а бот узнаёт об этом
+    // только по этому событию. Сообщаем владельцу и показываем актуальное меню.
+    await notifyConnectionChange(ownerId, connectionId, isEnabledFlag, conn);
   } catch (error) {
     console.error('[Business Connection Error]:', error);
+  }
+}
+
+/// Сообщает владельцу о смене статуса подключения и обновляет меню.
+async function notifyConnectionChange(ownerId, connectionId, isEnabled, conn) {
+  const api = config.bot.api;
+  const username = (config.botInfo && config.botInfo.username) || '';
+
+  // имя бизнес-аккаунта, если Telegram его прислал
+  const accountName = conn && conn.user
+    ? [conn.user.first_name, conn.user.last_name].filter(Boolean).join(' ') ||
+      (conn.user.username ? `@${conn.user.username}` : '')
+    : '';
+
+  if (isEnabled) {
+    // пробуем отправить в сам Business-чат: это и есть проверка, что бот
+    // действительно может отвечать от имени владельца
+    let canReply = false;
+
+    try {
+      await api.sendMessage(
+        ownerId,
+        `<tg-emoji emoji-id="5776375003280838798">✅</tg-emoji> <b>Бот подключён к автоматизации</b>\n\n` +
+          `Перехват удалённых, изменённых и сгорающих сообщений активен.\n` +
+          `Управление — командами прямо в чате: <code>.nah</code>, <code>.love</code>, <code>.bypass</code>, <code>.mute</code>, <code>.unmute</code>.`,
+        {
+          parse_mode: 'HTML',
+          business_connection_id: connectionId,
+          link_preview_options: { is_disabled: true }
+        }
+      );
+
+      canReply = true;
+    } catch (error) {
+      const reason = String((error && (error.description || error.message)) || error);
+      console.error(`[Business Connection] ответ от имени владельца не прошёл: ${reason}`);
+
+      canReply = false;
+    }
+
+    // дублируем обычным сообщением — оно дойдёт в любом случае
+    const suffix = canReply
+      ? '\n\nОтвет от вашего имени проверен: работает.'
+      : '\n\n⚠️ Telegram не разрешил отвечать от вашего имени — проверьте, что боту выданы права на чтение и отправку.';
+
+    await api
+      .sendMessage(
+        ownerId,
+        `<tg-emoji emoji-id="5877465816030515018">🔌</tg-emoji> <b>Подключение активно</b>${accountName ? ` — ${accountName}` : ''}${suffix}`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
+      )
+      .catch(() => {});
+  } else {
+    await api
+      .sendMessage(
+        ownerId,
+        `<tg-emoji emoji-id="5778527486270770928">❌</tg-emoji> <b>Подключение отключено</b>\n\n` +
+          `Перехват остановлен. Чтобы вернуть, добавьте <code>@${username}</code> в Автоматизацию чатов заново.`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
+      )
+      .catch(() => {});
+  }
+}
+
+/**
+ * Автопроверка подключения: если владелец зашёл в раздел, но событие
+ * business_connection до бота не дошло (бывает при первом подключении),
+ * статус всё равно должен быть верным.
+ *
+ * Проверяем фактическую возможность отправки в Business-чат, а не только
+ * запись в базе. Возвращает { connected, canReply, reason }.
+ */
+async function verifyConnection(ownerId) {
+  const api = config.bot.api;
+  const connection = typeof db.getBusinessConnectionByOwner === 'function'
+    ? db.getBusinessConnectionByOwner(ownerId)
+    : null;
+
+  if (!connection || !connection.connection_id) {
+    return {
+      connected: false,
+      canReply: false,
+      reason: 'запись о подключении отсутствует'
+    };
+  }
+
+  if (!(connection.is_enabled === true || Number(connection.is_enabled) === 1)) {
+    return {
+      connected: false,
+      canReply: false,
+      reason: 'подключение помечено как отключённое'
+    };
+  }
+
+  // Дополнительно убеждаемся, что соединение с Telegram живо:
+  // getMe дешёвый и не требует прав в чате.
+  try {
+    await api.getMe();
+    return { connected: true, canReply: true, reason: 'подключение активно' };
+  } catch (error) {
+    return {
+      connected: true,
+      canReply: false,
+      reason: String((error && (error.description || error.message)) || error)
+    };
   }
 }
 
@@ -399,7 +520,19 @@ async function onDeletedBusinessMessages(ctx) {
     if (!del || !del.message_ids) return;
 
     if (typeof db.markMessagesDeleted === 'function') {
-      db.markMessagesDeleted(del.chat.id, del.message_ids, del.business_connection_id);
+      // Третий аргумент — id ВЛАДЕЛЬЦА (число), не business_connection_id.
+      // Раньше сюда уходила строка подключения: владелец становился NaN,
+      // фильтр по нему не работал.
+      const ownerId =
+        typeof db.getBusinessConnectionOwner === 'function'
+          ? db.getBusinessConnectionOwner(del.business_connection_id)
+          : null;
+
+      db.markMessagesDeleted(
+        del.chat.id,
+        del.message_ids,
+        Number.isSafeInteger(Number(ownerId)) && Number(ownerId) > 0 ? Number(ownerId) : null
+      );
     }
   } catch (error) {
     console.error('[Deleted Business Messages Error]:', error);
@@ -429,5 +562,7 @@ module.exports = {
   downloadTelegramFile,
   extractMediaMeta,
 
-  registerBusinessHandlers
+  registerBusinessHandlers,
+  verifyConnection,
+  notifyConnectionChange
 };

@@ -36,11 +36,19 @@ function sendHtml(chatId, text, extra = {}) {
   return api.sendMessage(chatId, text, { parse_mode: 'HTML', ...extra });
 }
 
-async function showMenu(chatId, messageId, menu) {
+/**
+ * Показывает меню. businessConnectionId обязателен для Business-чатов:
+ * без него Telegram не удаляет прошлое меню (появляются дубли) и не даёт
+ * отправить сообщение от имени владельца.
+ */
+async function showMenu(chatId, messageId, menu, businessConnectionId) {
+  const options = businessConnectionId ? { business_connection_id: businessConnectionId } : {};
+
   if (messageId) {
-    return menus.replaceMenu(bot, chatId, messageId, menu);
+    return menus.replaceMenu(bot, chatId, messageId, menu, options);
   }
-  return menus.sendMenu(bot, chatId, menu);
+
+  return menus.sendMenu(bot, chatId, menu, options);
 }
 
 function cleanFilePath(value) {
@@ -729,6 +737,10 @@ bot.on('callback_query:data', async (ctx) => {
   const messageId = query.message.message_id;
   const userId = query.from.id;
   const data = query.data || '';
+  // в Business-чате Telegram кладёт сюда id подключения: по нему меню
+  // удаляется и отправляется от имени владельца
+  const businessConnectionId =
+    query.message.business_connection_id || ctx.businessConnectionId || null;
   try {
     const user = ensureUserRecord(query.from);
     if (isBanned(user) && !isAdmin(userId)) {
@@ -738,13 +750,13 @@ bot.on('callback_query:data', async (ctx) => {
       userStates.delete(userId);
       adminStates.delete(userId);
       const mainMenu = menus.getMainMenu(query.from);
-      await showMenu(chatId, messageId, mainMenu);
+      await showMenu(chatId, messageId, mainMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data === 'menu_settings') {
       userStates.delete(userId);
       const settingsMenu = menus.getSettingsMenu(userId);
-      await showMenu(chatId, messageId, settingsMenu);
+      await showMenu(chatId, messageId, settingsMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data === 'toggle_deleted' || data === 'toggle_edited') {
@@ -755,26 +767,47 @@ bot.on('callback_query:data', async (ctx) => {
       const updated = await updateUserNotification(userId, field, nextValue);
       if (!updated) return ctx.answerCallbackQuery({ text: 'В database.js отсутствует настройка.', show_alert: true });
       const settingsMenu = menus.getSettingsMenu(userId);
-      await showMenu(chatId, messageId, settingsMenu);
+      await showMenu(chatId, messageId, settingsMenu, businessConnectionId);
       return ctx.answerCallbackQuery({ text: `${field === 'notify_deleted' ? 'Удалённые' : 'Изменённые'}: ${nextValue ? 'ВКЛ ✅' : 'ВЫКЛ ❌'}` });
     }
     if (data === 'menu_connect') {
       const connectMenu = menus.getConnectMenu();
-      await showMenu(chatId, messageId, connectMenu);
+      await showMenu(chatId, messageId, connectMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data === 'check_connection') {
-      const connection = typeof db.getBusinessConnectionByOwner === 'function' ? db.getBusinessConnectionByOwner(userId) : null;
-      if (connection && isEnabled(connection.is_enabled)) {
-        await ctx.answerCallbackQuery({ text: '✅ Бизнес-режим успешно подключён и активен!', show_alert: true });
-        const mainMenu = menus.getMainMenu(query.from);
-        return showMenu(chatId, messageId, mainMenu);
+      // Настоящая проверка: не только запись в базе, но и живость связи
+      // с Telegram. Если GitHub-событие business_connection до бота не дошло,
+      // владелец всё равно получит верный ответ.
+      const result = await business.verifyConnection(userId).catch(() => ({
+        connected: false,
+        canReply: false,
+        reason: 'проверка не удалась'
+      }));
+
+      if (result.connected && result.canReply) {
+        await ctx.answerCallbackQuery({
+          text: '✅ Подключение активно — бот отвечает от вашего имени',
+          show_alert: true
+        });
+      } else if (result.connected) {
+        await ctx.answerCallbackQuery({
+          text: `⚠️ Подключение записано, но нет связи: ${result.reason}`,
+          show_alert: true
+        });
+      } else {
+        await ctx.answerCallbackQuery({
+          text: `❌ Подключение не найдено. Добавьте @${botInfo.username} в Telegram Business → Автоматизация чатов.`,
+          show_alert: true
+        });
       }
-      return ctx.answerCallbackQuery({ text: `❌ Подключение не найдено. Добавьте @${botInfo.username} в настройки.`, show_alert: true });
+
+      const mainMenu = menus.getMainMenu(query.from);
+      return showMenu(chatId, messageId, mainMenu, businessConnectionId);
     }
     if (data === 'menu_ref') {
       const referralMenu = menus.getRefMenu(userId);
-      await showMenu(chatId, messageId, referralMenu);
+      await showMenu(chatId, messageId, referralMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data === 'share_ref') {
@@ -803,12 +836,12 @@ bot.on('callback_query:data', async (ctx) => {
     }
     if (data === 'menu_sub') {
       const subscriptionMenu = menus.getSubMenu(userId);
-      await showMenu(chatId, messageId, subscriptionMenu);
+      await showMenu(chatId, messageId, subscriptionMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data === 'menu_premium') {
       const premiumMenu = menus.getPremiumMenu(userId);
-      await showMenu(chatId, messageId, premiumMenu);
+      await showMenu(chatId, messageId, premiumMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data === 'buy_sub_7' || data === 'buy_sub_30' || data === 'buy_sub_90' || data === 'buy_sub_premium') {
@@ -829,7 +862,7 @@ bot.on('callback_query:data', async (ctx) => {
     if (data === 'archive_import_cancel') {
       userStates.delete(userId);
       const mainMenu = menus.getMainMenu(query.from);
-      await showMenu(chatId, messageId, mainMenu);
+      await showMenu(chatId, messageId, mainMenu, businessConnectionId);
       return ctx.answerCallbackQuery({ text: 'Импорт отменён.' });
     }
     if (data === 'archive_import_again') {
@@ -863,7 +896,7 @@ bot.on('callback_query:data', async (ctx) => {
     if (data === 'arch_cancel') {
       archiveSessions.delete(userId);
       const mainMenu = menus.getMainMenu(query.from);
-      await showMenu(chatId, messageId, mainMenu);
+      await showMenu(chatId, messageId, mainMenu, businessConnectionId);
       return ctx.answerCallbackQuery({ text: 'Отменено.' });
     }
     if (data === 'arch_start') {
@@ -886,7 +919,7 @@ bot.on('callback_query:data', async (ctx) => {
         } finally { try { fs.unlinkSync(safePath); } catch (_) {} }
         archiveSessions.delete(userId);
         const mainMenu = menus.getMainMenu(query.from);
-        return showMenu(chatId, messageId, mainMenu);
+        return showMenu(chatId, messageId, mainMenu, businessConnectionId);
       } catch (error) {
         const typesMenu = menus.getArchiveTypesMenu(session);
         return editOrSend(chatId, messageId, `❌ Ошибка: <code>${escapeHtml(error.message)}</code>`, typesMenu.reply_markup);
@@ -896,7 +929,7 @@ bot.on('callback_query:data', async (ctx) => {
       if (!isAdmin(userId)) return ctx.answerCallbackQuery({ text: '⛔️ Нет доступа.', show_alert: true });
       adminStates.delete(userId);
       const adminMenu = menus.getAdminMenu();
-      await showMenu(chatId, messageId, adminMenu);
+      await showMenu(chatId, messageId, adminMenu, businessConnectionId);
       return ctx.answerCallbackQuery();
     }
     if (data.startsWith('admin_')) {

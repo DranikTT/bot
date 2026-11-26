@@ -302,6 +302,17 @@ function saveBusinessConnection(userId, connectionId, isEnabled) {
     .run(connectionId, uid, uid, Number(isEnabled), now);
 }
 
+/// Владелец по id подключения — обратная операция к saveBusinessConnection.
+function getBusinessConnectionOwner(connectionId) {
+  if (!connectionId) return null;
+
+  const row = db
+    .prepare('SELECT user_id FROM business_connections WHERE connection_id = ? LIMIT 1')
+    .get(String(connectionId));
+
+  return row ? row.user_id : null;
+}
+
 function getBusinessConnectionByOwner(userId) {
   const uid = Number(userId);
 
@@ -676,9 +687,15 @@ function markMessagesDeleted(chatId, messageIds, ownerId = null) {
   const params = [Number(chatId), ...messageIds.map(Number)];
 
   let sql = `UPDATE messages SET is_deleted = 1 WHERE chat_id = ? AND message_id IN (${placeholders})`;
-  if (ownerId !== null) {
+
+  // ownerId — числовой id владельца. Вызывающий код раньше передавал сюда
+  // business_connection_id (строку вида "conn-abc"), из-за чего владелец
+  // превращался в NaN и фильтр никогда не срабатывал.
+  const owner = Number(ownerId);
+
+  if (ownerId !== null && ownerId !== undefined && Number.isSafeInteger(owner) && owner > 0) {
     sql += ' AND owner_id = ?';
-    params.push(Number(ownerId));
+    params.push(owner);
   }
 
   const info = db.prepare(sql).run(...params);
@@ -752,6 +769,7 @@ module.exports = {
   createUser,
   saveBusinessConnection,
   getBusinessConnectionByOwner,
+  getBusinessConnectionOwner,
   addSubscriptionDays,
   setPremium,
   setBan,

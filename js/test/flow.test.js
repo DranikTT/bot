@@ -254,6 +254,89 @@ test('шифрование читает старые записи открыты
 });
 
 test('эмодзи-идентификаторы совпадают с исходным проектом', () => {
+// --- Business-чат: главная проверка «нет дублей» -------------------------
+// Сценарий фейка присылает business_connection (владелец 777) и три нажатия
+// в чате КЛИЕНТА (555) с business_connection_id = conn-e2e.
+
+test('бот сам обработал business_connection (без нажатия кнопки)', () => {
+  const saved = callsOf('sendMessage').filter(
+    (call) =>
+      String(call.payload.chat_id) === '777' &&
+      /Подключение активно|Бот подключён/i.test(String(call.payload.text || ''))
+  );
+
+  assert.ok(
+    saved.length > 0,
+    'бот не отреагировал на business_connection — владелец не узнал о подключении'
+  );
+});
+
+test('Business: ни одного проваленного deleteMessage', () => {
+  const failed = callsOf('deleteMessage').filter((call) => call.failed);
+
+  assert.strictEqual(
+    failed.length,
+    0,
+    `провалено удалений: ${failed.length} — старое меню остаётся, новое приходит сверху (дубли)`
+  );
+});
+
+test('Business: каждое удаление в чате клиента несёт conn-e2e', () => {
+  const deletes = callsOf('deleteMessage').filter(
+    (call) => String(call.payload.chat_id) === '555'
+  );
+
+  assert.ok(deletes.length > 0, 'удалений в Business-чате не было вовсе — меню копится');
+
+  for (const call of deletes) {
+    assert.strictEqual(
+      call.payload.business_connection_id,
+      'conn-e2e',
+      `deleteMessage без правильного business_connection_id: ${JSON.stringify(call.payload)}`
+    );
+  }
+});
+
+test('Business: на каждый экран ровно одно новое меню', () => {
+  // три нажатия в чате клиента → три пары «удалить старое / показать новое»
+  const inClientChat = [
+    ...callsOf('sendMessage'),
+    ...callsOf('sendPhoto')
+  ].filter((call) => String(call.payload.chat_id) === '555');
+  const deletesInClientChat = callsOf('deleteMessage').filter(
+    (call) => String(call.payload.chat_id) === '555'
+  );
+
+  assert.strictEqual(inClientChat.length, 3, `меню в чате клиента: ${inClientChat.length}, ожидалось 3`);
+  assert.strictEqual(
+    deletesInClientChat.length,
+    inClientChat.length,
+    `отправлено ${inClientChat.length}, удалено ${deletesInClientChat.length} — меню копится`
+  );
+
+  // ни одна отправка не осталась без удаления предыдущей
+  assert.ok(
+    inClientChat.every((call) => call.payload.business_connection_id === 'conn-e2e'),
+    'меню в Business-чат ушло без business_connection_id'
+  );
+});
+
+test('личный чат владельца не ломается (удаления без connection_id)', () => {
+  const deletes = callsOf('deleteMessage').filter(
+    (call) => String(call.payload.chat_id) === '777'
+  );
+
+  assert.ok(deletes.length > 0, 'в личном чате меню не заменяется');
+
+  for (const call of deletes) {
+    assert.strictEqual(
+      call.payload.business_connection_id,
+      undefined,
+      'в личном чате лишний business_connection_id — Telegram отклонит удаление'
+    );
+  }
+});
+
   process.env.BOT_TOKEN = process.env.BOT_TOKEN || '42:TESTTOKEN';
   process.env.DATABASE_PATH = process.env.DATABASE_PATH || DB_PATH;
   const keys = require('../menuKeys');

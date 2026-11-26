@@ -139,6 +139,9 @@ function getMainMenuText(fromUser) {
       ? db.getBusinessConnectionByOwner(userId)
       : null;
 
+  // Статус берём из базы, но она обновляется только событием
+  // business_connection. Если Telegram событие не прислал, показываем
+  // честное «Не подключён» — и владелец сразу видит, что нужно действие.
   const isConnected =
     conn && (conn.is_enabled === true || Number(conn.is_enabled) === 1);
   const connStatus = isConnected ? 'Подключён' : 'Не подключён';
@@ -443,6 +446,28 @@ function isSelfBusinessSend(conn, chatId) {
   return Boolean(conn && Number(conn.user_id) === Number(chatId));
 }
 
+/**
+ * Какой business_connection_id использовать для этого чата.
+ *
+ * Приоритет — значение из самого обновления (ctx.businessConnectionId):
+ * в Business-чате с клиентом chat_id это id КЛИЕНТА, искать подключение
+ * по нему в базе бессмысленно — там ключ владельца. База остаётся
+ * фолбэком для случаев, когда обновление пришло без этого поля.
+ */
+function resolveConnectionId(chatId, options = {}) {
+  const explicit = options.business_connection_id || options.businessConnectionId;
+
+  if (explicit) return String(explicit);
+
+  const conn = getBusinessConnectionForMenu(chatId);
+
+  if (isConnectionEnabled(conn) && conn.connection_id && !isSelfBusinessSend(conn, chatId)) {
+    return String(conn.connection_id);
+  }
+
+  return null;
+}
+
 async function trySendMenuPhoto(api, chatId, menu, sendOptions, bannerKey, errorTag) {
   const photoSource =
     bannerFileIdCache[bannerKey] || new InputFile(menu.banner);
@@ -474,12 +499,14 @@ async function sendMenu(botOrApi, chatId, menu, options = {}) {
   const conn = getBusinessConnectionForMenu(chatId);
 
   const isSelfSend = isSelfBusinessSend(conn, chatId);
-  const isConnected = isConnectionEnabled(conn) && !isSelfSend;
+  const connectionId = resolveConnectionId(chatId, options);
 
   const sendOptions = {
     parse_mode: menu.parse_mode || 'HTML',
     ...options
   };
+
+  delete sendOptions.businessConnectionId;
 
   const keyboard = menu.reply_markup || menu.keyboard;
   if (keyboard) {
@@ -491,8 +518,8 @@ async function sendMenu(botOrApi, chatId, menu, options = {}) {
     ? fs.existsSync(menu.banner) && isImageFile(menu.banner)
     : false;
 
-  if (isConnected && conn.connection_id) {
-    sendOptions.business_connection_id = conn.connection_id;
+  if (connectionId && !isSelfSend) {
+    sendOptions.business_connection_id = connectionId;
 
     if (bannerExists) {
       const photoMsg = await trySendMenuPhoto(
@@ -526,13 +553,58 @@ async function sendMenu(botOrApi, chatId, menu, options = {}) {
   return api.sendMessage(chatId, menu.text, sendOptions);
 }
 
+/**
+ * Удаление сообщения «одним payload».
+ *
+ * grammy накладывает ограничение: у deleteMessage третий аргумент — это
+ * AbortSignal, и передать туда business_connection_id нельзя. Поэтому идём
+ * через raw-метод, который принимает весь payload целиком.
+ */
+function deleteTelegramMessage(api, payload) {
+  if (api.raw && typeof api.raw.deleteMessage === 'function') {
+    return api.raw.deleteMessage(payload);
+  }
+
+  // простая реализация (тесты, сторонние обёртки) — тот же формат payload
+  if (typeof api.deleteMessage === 'function') {
+    return api.deleteMessage(payload);
+  }
+
+  throw new Error('У API нет метода deleteMessage');
+}
+
+/**
+ * Заменяет старое меню новым: удаляет прежнее сообщение и отправляет свежее.
+ *
+ * Ключевой момент: в Business-чате Telegram не удаляет сообщение без
+ * business_connection_id — вызов падает с «message can't be deleted».
+ * Раньше ошибка молча проглатывалась, старое меню оставалось на месте,
+ * и на каждое нажатие приходило новое поверх старого (стопка дублей).
+ */
 async function replaceMenu(botOrApi, chatId, messageId, menu, options = {}) {
   const api = resolveApi(botOrApi);
+  if (api && Number.isFinite(Number(messageId)) && messageId > 0) {
+    // тот же business_connection_id, что и при отправке
+    const payload = { chat_id: chatId, message_id: messageId };
+    const connectionId = resolveConnectionId(chatId, options);
 
-  if (api && Number.isFinite(Number(messageId))) {
+    if (connectionId) payload.business_connection_id = connectionId;
+
     try {
-      await api.deleteMessage(chatId, messageId);
-    } catch (error) {}
+      // ВАЖНО: deleteMessage(chat_id, message_id, signal) — третий аргумент
+      // это AbortSignal, а не опции. Параметры кладём в один payload:
+      // иначе grammy падает на «Incorrect abort signal instance found»
+      // ещё до сети, business_connection_id теряется, и старое меню
+      // остаётся — отсюда стопка дублей.
+      await deleteTelegramMessage(api, payload);
+    } catch (error) {
+      const reason = String((error && (error.description || error.message)) || error);
+
+      // «message to delete not found» — сообщение уже удалено, всё в порядке
+      if (!/not found|message can't be deleted/i.test(reason)) {
+        console.error(`[replaceMenu] не удалось удалить ${messageId}: ${reason}`);
+      }
+    }
   }
 
   return sendMenu(botOrApi, chatId, menu, options);

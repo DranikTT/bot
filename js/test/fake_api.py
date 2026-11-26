@@ -20,7 +20,12 @@ PORT = int(__import__("os").environ.get("FAKE_PORT", "8099"))
 CALLS: list[dict] = []
 UPDATES: list[dict] = []
 # Отказ на кастомные эмодзи — воспроизводит боевой DOCUMENT_INVALID.
-REJECT_EMOJI = {"value": False}  # True — имитация отказа DOCUMENT_INVALID
+# Имитация отказа DOCUMENT_INVALID: REJECT_EMOJI=1 в окружении.
+REJECT_EMOJI = {"value": __import__("os").environ.get("REJECT_EMOJI", "") == "1"}
+# Чаты, которые ведут себя как Business: Telegram отказывает в удалении
+# сообщения без business_connection_id. Пустое множество — обычный режим.
+BUSINESS_CHATS = {"value": {"555"}}
+_FAILED_DELETES = {"value": 0}
 LOCK = threading.Lock()
 
 USER = {"id": 777, "first_name": "Вася", "username": "vasya", "is_bot": False}
@@ -148,6 +153,21 @@ class Handler(BaseHTTPRequestHandler):
 
             CALLS.append({"method": method, "payload": payload})
 
+            # Так ведёт себя настоящий Telegram в Business-чате:
+            # deleteMessage без business_connection_id не удаляет сообщение.
+            # Бот молча терял удаление, и меню копились стопкой.
+            if method == "deleteMessage" and not payload.get("business_connection_id"):
+                chat_id = payload.get("chat_id")
+                # только для чатов из списка Business: в обычном чате удаление работает
+                if chat_id is not None and str(chat_id) in BUSINESS_CHATS["value"]:
+                    CALLS[-1]["failed"] = True
+                    _FAILED_DELETES["value"] += 1
+                    return self._send({
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "Bad Request: message can't be deleted",
+                    })
+
             body_text = json.dumps(payload, ensure_ascii=False)
             has_custom_emoji = (
                 "tg-emoji" in body_text
@@ -178,6 +198,39 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
 
+def update_business_connection(update_id: int, connection_id: str, enabled: bool) -> dict:
+    return {
+        "update_id": update_id,
+        "business_connection": {
+            "id": connection_id,
+            "user": USER,
+            "user_chat_id": USER["id"],
+            "date": 1700000000,
+            "is_enabled": enabled,
+        },
+    }
+
+
+def update_business_callback(update_id: int, data: str, connection_id: str) -> dict:
+    """Нажатие кнопки в Business-чате с клиентом (chat_id ≠ владелец)."""
+    client = {"id": 555, "first_name": "Клиент", "is_bot": False}
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"cb{update_id}",
+            "from": USER,
+            "message": {
+                "message_id": 60,
+                "chat": {"id": 555, "type": "private", "first_name": "Клиент"},
+                "date": 1700000000,
+                "business_connection_id": connection_id,
+            },
+            "chat_instance": "1",
+            "data": data,
+        },
+    }
+
+
 def scenario() -> list[dict]:
     """Сценарий: старт → настройки → тарифы → премиум → реферал → архив."""
     return [
@@ -190,6 +243,11 @@ def scenario() -> list[dict]:
         update_callback(7, "menu_connect"),
         update_callback(8, "back_main"),
         update_callback(9, "buy_sub_30"),
+        # --- Business: бот сам узнаёт о подключении, затем меню в чате клиента
+        update_business_connection(10, "conn-e2e", True),
+        update_business_callback(11, "back_main", "conn-e2e"),
+        update_business_callback(12, "menu_settings", "conn-e2e"),
+        update_business_callback(13, "menu_sub", "conn-e2e"),
     ]
 
 
