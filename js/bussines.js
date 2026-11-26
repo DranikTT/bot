@@ -258,7 +258,9 @@ async function downloadTelegramFile(fileId, prefix = 'media', mediaType = 'docum
         reject(error);
       };
 
-      const request = https.get(fileUrl, (response) => {
+      const transport = fileUrl.startsWith('https:') ? https : require('http');
+
+      const request = transport.get(fileUrl, (response) => {
         if (response.statusCode !== 200) {
           response.resume();
           fail(new Error(`HTTP ${response.statusCode}`));
@@ -286,7 +288,8 @@ async function downloadTelegramFile(fileId, prefix = 'media', mediaType = 'docum
 
       request.on('error', fail);
     });
-  } catch {
+  } catch (error) {
+    console.error('[downloadTelegramFile]:', error.message);
     return null;
   }
 }
@@ -346,7 +349,19 @@ function extractMediaMeta(message) {
 async function onBusinessConnection(ctx) {
   try {
     const conn = ctx.businessConnection;
-    const ownerId = conn.user_id;
+
+    // В Telegram поле называется user_chat_id (id личного чата владельца).
+    // Раньше читали conn.user_id — его не существует, владелец выходил
+    // undefined, и подключение записывалось в никуда.
+    const ownerId = Number(
+      conn.user_chat_id || (conn.user && conn.user.id) || 0
+    );
+
+    if (!ownerId) {
+      console.error('[Business Connection] не удалось определить владельца:', conn);
+      return;
+    }
+
     const connectionId = conn.id;
     const isEnabledFlag = conn.is_enabled ? 1 : 0;
 
@@ -362,8 +377,117 @@ async function onBusinessConnection(ctx) {
     console.log(
       `[Business Connection] Обновлен статус для ${ownerId}: ID=${connectionId}, Active=${isEnabledFlag}`
     );
+
+    // Подключение меняется владельцем в настройках, а бот узнаёт об этом
+    // только по этому событию. Сообщаем владельцу и показываем актуальное меню.
+    await notifyConnectionChange(ownerId, connectionId, isEnabledFlag, conn);
   } catch (error) {
     console.error('[Business Connection Error]:', error);
+  }
+}
+
+/// Сообщает владельцу о смене статуса подключения и обновляет меню.
+async function notifyConnectionChange(ownerId, connectionId, isEnabled, conn) {
+  const api = config.bot.api;
+  const username = (config.botInfo && config.botInfo.username) || '';
+
+  // имя бизнес-аккаунта, если Telegram его прислал
+  const accountName = conn && conn.user
+    ? [conn.user.first_name, conn.user.last_name].filter(Boolean).join(' ') ||
+      (conn.user.username ? `@${conn.user.username}` : '')
+    : '';
+
+  if (isEnabled) {
+    // пробуем отправить в сам Business-чат: это и есть проверка, что бот
+    // действительно может отвечать от имени владельца
+    let canReply = false;
+
+    try {
+      await api.sendMessage(
+        ownerId,
+        `<tg-emoji emoji-id="5776375003280838798">✅</tg-emoji> <b>Бот подключён к автоматизации</b>\n\n` +
+          `Перехват удалённых, изменённых и сгорающих сообщений активен.\n` +
+          `Управление — командами прямо в чате: <code>.nah</code>, <code>.love</code>, <code>.bypass</code>, <code>.mute</code>, <code>.unmute</code>.`,
+        {
+          parse_mode: 'HTML',
+          business_connection_id: connectionId,
+          link_preview_options: { is_disabled: true }
+        }
+      );
+
+      canReply = true;
+    } catch (error) {
+      const reason = String((error && (error.description || error.message)) || error);
+      console.error(`[Business Connection] ответ от имени владельца не прошёл: ${reason}`);
+
+      canReply = false;
+    }
+
+    // дублируем обычным сообщением — оно дойдёт в любом случае
+    const suffix = canReply
+      ? '\n\nОтвет от вашего имени проверен: работает.'
+      : '\n\n⚠️ Telegram не разрешил отвечать от вашего имени — проверьте, что боту выданы права на чтение и отправку.';
+
+    await api
+      .sendMessage(
+        ownerId,
+        `<tg-emoji emoji-id="5877465816030515018">🔌</tg-emoji> <b>Подключение активно</b>${accountName ? ` — ${accountName}` : ''}${suffix}`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
+      )
+      .catch(() => {});
+  } else {
+    await api
+      .sendMessage(
+        ownerId,
+        `<tg-emoji emoji-id="5778527486270770928">❌</tg-emoji> <b>Подключение отключено</b>\n\n` +
+          `Перехват остановлен. Чтобы вернуть, добавьте <code>@${username}</code> в Автоматизацию чатов заново.`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
+      )
+      .catch(() => {});
+  }
+}
+
+/**
+ * Автопроверка подключения: если владелец зашёл в раздел, но событие
+ * business_connection до бота не дошло (бывает при первом подключении),
+ * статус всё равно должен быть верным.
+ *
+ * Проверяем фактическую возможность отправки в Business-чат, а не только
+ * запись в базе. Возвращает { connected, canReply, reason }.
+ */
+async function verifyConnection(ownerId) {
+  const api = config.bot.api;
+  const connection = typeof db.getBusinessConnectionByOwner === 'function'
+    ? db.getBusinessConnectionByOwner(ownerId)
+    : null;
+
+  if (!connection || !connection.connection_id) {
+    return {
+      connected: false,
+      canReply: false,
+      reason: 'запись о подключении отсутствует'
+    };
+  }
+
+  if (!(connection.is_enabled === true || Number(connection.is_enabled) === 1)) {
+    return {
+      connected: false,
+      canReply: false,
+      reason: 'подключение помечено как отключённое'
+    };
+  }
+
+  // Дополнительно убеждаемся, что соединение с Telegram живо:
+  // getMe дешёвый и не требует прав в чате.
+  try {
+    await api.getMe();
+    return { connected: true, canReply: true, reason: 'подключение активно' };
+  } catch (error) {
+    return {
+      connected: true,
+      canReply: false,
+      reason: String((error && (error.description || error.message)) || error)
+    };
   }
 }
 
@@ -372,11 +496,69 @@ async function onBusinessMessage(ctx) {
     const message = ctx.businessMessage;
     if (!message || !message.from) return;
 
+    // Сначала владелец: без записи в business_connections saveMessage
+    // не сможет его определить и привяжет сообщение к отправителю.
+    if (message.business_connection_id) {
+      await resolveOwner(message.business_connection_id);
+    }
+
     if (typeof db.saveMessage === 'function') {
       db.saveMessage(message);
     }
+
+    // Фото/видео «сгорают»: после удаления file_id может стать недоступен,
+    // и переслать владельцу будет нечего. Скачиваем сразу, пока сообщение живо.
+    await cacheSelfDestructMedia(message);
   } catch (error) {
     console.error('[Business Message Error]:', error);
+  }
+}
+
+/**
+ * Самоудаляющиеся сообщения.
+ *
+ * Отдельного поля «сгорит» Bot API не отдаёт — определить можно только по
+ * косвенным признакам (медиа со спойлером, медиа без текста). Поэтому
+ * сохраняем медиа сразу после получения, не дожидаясь удаления: к моменту,
+ * когда придёт deleted_business_messages, файла уже может не быть.
+ */
+async function cacheSelfDestructMedia(message) {
+  const media = extractMediaMeta(message);
+
+  if (!media.fileId || capturedMediaMsgIds.has(message.message_id)) return;
+
+  const suspected =
+    Boolean(message.has_media_spoiler) ||
+    Boolean(message.self_destruct_media) ||
+    Boolean(media.mediaType && !message.text && !message.caption);
+
+  if (!suspected) return;
+
+  const lockKey = `${message.chat.id}:${message.message_id}`;
+
+  if (mediaForwardInFlight.has(lockKey)) return;
+
+  mediaForwardInFlight.add(lockKey);
+  addTracked(capturedMediaMsgIds, message.message_id);
+
+  try {
+    const localPath = await downloadTelegramFile(
+      media.fileId,
+      `sd_${message.chat.id}_${message.message_id}`,
+      media.mediaType
+    );
+
+    if (localPath && typeof db.saveMediaPath === 'function') {
+      db.saveMediaPath(message.chat.id, message.message_id, localPath);
+    }
+
+    if (suspected && typeof db.markSelfDestruct === 'function') {
+      db.markSelfDestruct(message.chat.id, message.message_id, 1);
+    }
+  } catch (error) {
+    console.error('[Self-destruct media]:', error.message);
+  } finally {
+    mediaForwardInFlight.delete(lockKey);
   }
 }
 
@@ -385,9 +567,45 @@ async function onEditedBusinessMessage(ctx) {
     const message = ctx.editedBusinessMessage;
     if (!message) return;
 
+    // старый текст нужен ДО сохранения: saveEditedMessage перезапишет его
+    const before = typeof db.getStoredMessage === 'function'
+      ? db.getStoredMessage(message.chat.id, message.message_id)
+      : null;
+
     if (typeof db.saveEditedMessage === 'function') {
       db.saveEditedMessage(message);
     }
+
+    const owner = await resolveOwner(message.business_connection_id);
+
+    if (!owner) return;
+
+    const notify = typeof db.getNotifySettings === 'function'
+      ? db.getNotifySettings(owner)
+      : { edited: true };
+
+    if (!notify.edited) return;
+
+    const oldText = before ? String(before.text || '').trim() : '';
+    const newText = String(message.text || message.caption || '').trim();
+
+    // Telegram присылает edited_business_message и на разметку без правки
+    // текста — не дёргаем владельца зря
+    if (oldText === newText) return;
+
+    const who = (message.from && (message.from.first_name || message.from.username)) ||
+      (message.chat && (message.chat.first_name || message.chat.username)) ||
+      'Собеседник';
+
+    const body =
+      `<tg-emoji emoji-id="5877260593903177342">✏️</tg-emoji> <b>Изменённое сообщение</b>\n` +
+      `От: <b>${escapeHtml(who)}</b>\n\n` +
+      (oldText
+        ? `<s>${escapeHtml(oldText)}</s>\n\n`
+        : '<i>было без текста</i>\n\n') +
+      `${escapeHtml(newText || '(текст удалён)')}`;
+
+    await sendHtmlMessage(owner, body).catch(() => {});
   } catch (error) {
     console.error('[Edited Business Message Error]:', error);
   }
@@ -398,12 +616,155 @@ async function onDeletedBusinessMessages(ctx) {
     const del = ctx.deletedBusinessMessages;
     if (!del || !del.message_ids) return;
 
+    // владельца определяем с самовосстановлением: событие подключения
+    // могло не дойти или прийти позже самой переписки
+    const owner = await resolveOwner(del.business_connection_id);
+
+    // Третий аргумент — id ВЛАДЕЛЬЦА (число), не business_connection_id:
+    // раньше сюда уходила строка подключения, владелец становился NaN.
     if (typeof db.markMessagesDeleted === 'function') {
-      db.markMessagesDeleted(del.chat.id, del.message_ids, del.business_connection_id);
+      db.markMessagesDeleted(del.chat.id, del.message_ids, owner);
+    }
+
+    // Без уведомления перехват бессмыслен: сообщение сохранено, но владелец
+    // о нём не знает. Telegram присылает только id — текст берём из базы.
+    if (!owner) return;
+
+    const notify = typeof db.getNotifySettings === 'function'
+      ? db.getNotifySettings(owner)
+      : { deleted: true };
+
+    if (!notify.deleted) return;
+
+    // пачкой: Telegram шлёт все удалённые id одним обновлением
+    for (const messageId of del.message_ids.slice(0, 10)) {
+      const stored = typeof db.getStoredMessage === 'function'
+        ? db.getStoredMessage(del.chat.id, messageId)
+        : null;
+
+      await sendDeletedNotice(owner, del.chat, messageId, stored);
+    }
+
+    if (del.message_ids.length > 10) {
+      await sendHtmlMessage(
+        owner,
+        `<tg-emoji emoji-id="5814281611541222134">🗑</tg-emoji> …и ещё <b>${del.message_ids.length - 10}</b> удалённых.`
+      ).catch(() => {});
     }
   } catch (error) {
     console.error('[Deleted Business Messages Error]:', error);
   }
+}
+
+/**
+ * Кто владелец этого подключения — с самовосстановлением.
+ *
+ * Событие business_connection приходит не всегда и не всегда первым:
+ * при перезапуске бота, при подключении задним числом, при потере
+ * обновления. Раньше в этом случае владелец оставался неизвестным,
+ * и перехват молча не работал. Теперь бот спрашивает сам Telegram
+ * и запоминает ответ.
+ */
+async function resolveOwner(connectionId) {
+  if (!connectionId) return null;
+
+  const known =
+    typeof db.getBusinessConnectionOwner === 'function'
+      ? db.getBusinessConnectionOwner(connectionId)
+      : null;
+
+  const knownId = Number(known);
+
+  if (Number.isSafeInteger(knownId) && knownId > 0) return knownId;
+
+  // в базе нет — спрашиваем Telegram
+  try {
+    const conn = await api.getBusinessConnection(connectionId);
+    const ownerId = Number(
+      (conn && (conn.user_chat_id || (conn.user && conn.user.id))) || 0
+    );
+
+    if (!ownerId) return null;
+
+    if (typeof db.saveBusinessConnection === 'function') {
+      db.saveBusinessConnection(ownerId, connectionId, conn.is_enabled ? 1 : 0);
+    }
+
+    console.log(
+      `[Business] Подключение ${connectionId} восстановлено: владелец ${ownerId}`
+    );
+
+    return ownerId;
+  } catch (error) {
+    console.error(
+      `[Business] Не удалось определить владельца ${connectionId}:`,
+      (error && (error.description || error.message)) || error
+    );
+    return null;
+  }
+}
+
+/// Сообщение владельцу: «вот что собеседник удалил».
+async function sendDeletedNotice(ownerId, chat, messageId, stored) {
+  const who = stored
+    ? (stored.sender_name || stored.sender_username || 'Собеседник')
+    : (chat.first_name || chat.username || 'Собеседник');
+
+  const header =
+    `<tg-emoji emoji-id="5814281611541222134">🗑</tg-emoji> <b>Удалённое сообщение</b>\n` +
+    `От: <b>${escapeHtml(who)}</b>`;
+
+  if (!stored) {
+    // удалили то, чего бот не видел (до подключения или сообщение старше)
+    await sendHtmlMessage(
+      ownerId,
+      `${header}\n\n<i>Текст недоступен — сообщение пришло до подключения бота.</i>`
+    ).catch(() => {});
+    return;
+  }
+
+  const text = String(stored.text || '').trim();
+
+  if (!text && !stored.media_type) {
+    await sendHtmlMessage(ownerId, `${header}\n\n<i>Без текста.</i>`).catch(() => {});
+    return;
+  }
+
+  const caption = text ? `${header}\n\n${escapeHtml(text)}` : header;
+
+  // медиа пересылаем файлом/фото: file_id живёт и после удаления в чате
+  if (stored.media_type) {
+    try {
+      const sent = await safeSendMediaToChat(
+        ownerId,
+        stored.media_type,
+        stored.local_path,
+        stored.file_id,
+        { caption: `${caption}\n\n<i>${mediaLabel(stored.media_type)}</i>` }
+      );
+
+      return sent;
+    } catch (error) {
+      console.error('[Deleted Notice Media]:', error.message);
+    }
+  }
+
+  await sendHtmlMessage(ownerId, caption).catch(() => {});
+}
+
+function mediaLabel(mediaType) {
+  const labels = {
+    photo: 'фото',
+    video: 'видео',
+    video_note: 'видеосообщение',
+    animation: 'гифка',
+    voice: 'голосовое',
+    audio: 'аудио',
+    sticker: 'стикер',
+    document: 'документ'
+  };
+
+  return labels[mediaType] || 'медиа';
 }
 
 function registerBusinessHandlers() {
@@ -429,5 +790,10 @@ module.exports = {
   downloadTelegramFile,
   extractMediaMeta,
 
-  registerBusinessHandlers
+  registerBusinessHandlers,
+  resolveOwner,
+  sendDeletedNotice,
+  mediaLabel,
+  verifyConnection,
+  notifyConnectionChange
 };

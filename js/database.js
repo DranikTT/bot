@@ -302,6 +302,17 @@ function saveBusinessConnection(userId, connectionId, isEnabled) {
     .run(connectionId, uid, uid, Number(isEnabled), now);
 }
 
+/// Владелец по id подключения — обратная операция к saveBusinessConnection.
+function getBusinessConnectionOwner(connectionId) {
+  if (!connectionId) return null;
+
+  const row = db
+    .prepare('SELECT user_id FROM business_connections WHERE connection_id = ? LIMIT 1')
+    .get(String(connectionId));
+
+  return row ? row.user_id : null;
+}
+
 function getBusinessConnectionByOwner(userId) {
   const uid = Number(userId);
 
@@ -676,13 +687,69 @@ function markMessagesDeleted(chatId, messageIds, ownerId = null) {
   const params = [Number(chatId), ...messageIds.map(Number)];
 
   let sql = `UPDATE messages SET is_deleted = 1 WHERE chat_id = ? AND message_id IN (${placeholders})`;
-  if (ownerId !== null) {
+
+  // ownerId — числовой id владельца. Вызывающий код раньше передавал сюда
+  // business_connection_id (строку вида "conn-abc"), из-за чего владелец
+  // превращался в NaN и фильтр никогда не срабатывал.
+  const owner = Number(ownerId);
+
+  if (ownerId !== null && ownerId !== undefined && Number.isSafeInteger(owner) && owner > 0) {
     sql += ' AND owner_id = ?';
-    params.push(Number(ownerId));
+    params.push(owner);
   }
 
   const info = db.prepare(sql).run(...params);
   return info.changes || 0;
+}
+
+/// Путь к скачанному файлу медиа (для самоудаляющихся — успеваем сохранить).
+function saveMediaPath(chatId, messageId, localPath) {
+  if (!localPath) return false;
+
+  const info = db
+    .prepare('UPDATE messages SET local_path = ? WHERE chat_id = ? AND message_id = ?')
+    .run(String(localPath), Number(chatId), Number(messageId));
+
+  return (info.changes || 0) > 0;
+}
+
+/// Пометка «сообщение было самоудаляющимся».
+function markSelfDestruct(chatId, messageId, flag = 1) {
+  const info = db
+    .prepare('UPDATE messages SET is_self_destruct = ? WHERE chat_id = ? AND message_id = ?')
+    .run(flag ? 1 : 0, Number(chatId), Number(messageId));
+
+  return (info.changes || 0) > 0;
+}
+
+/// Сохранённое сообщение с расшифрованными полями (для уведомлений и архива).
+function getStoredMessage(chatId, messageId) {
+  const row = db
+    .prepare('SELECT * FROM messages WHERE chat_id = ? AND message_id = ?')
+    .get(Number(chatId), Number(messageId));
+
+  if (!row) return null;
+
+  return {
+    ...row,
+    text: decryptStr(row.text),
+    sender_name: decryptStr(row.sender_name),
+    sender_username: decryptStr(row.sender_username),
+    peer_name: decryptStr(row.peer_name),
+    peer_username: decryptStr(row.peer_username),
+    file_name: decryptStr(row.file_name),
+    edit_history: safeJsonArray(row.edit_history)
+  };
+}
+
+/// Настройки уведомлений владельца: что присылать, а что нет.
+function getNotifySettings(userId) {
+  const user = getUser(userId);
+
+  return {
+    deleted: !user || Number(user.notify_deleted) !== 0,
+    edited: !user || Number(user.notify_edited) !== 0
+  };
 }
 
 /// Отредактированный текст уже сохранённого сообщения (для архива).
@@ -752,6 +819,7 @@ module.exports = {
   createUser,
   saveBusinessConnection,
   getBusinessConnectionByOwner,
+  getBusinessConnectionOwner,
   addSubscriptionDays,
   setPremium,
   setBan,
@@ -768,6 +836,10 @@ module.exports = {
   saveEditedMessage,
   markMessagesDeleted,
   getEditedText,
+  saveMediaPath,
+  markSelfDestruct,
+  getStoredMessage,
+  getNotifySettings,
   encryptStr,
   decryptStr
 };

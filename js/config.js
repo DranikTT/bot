@@ -6,8 +6,19 @@ const { Bot } = require('grammy');
 const { run, sequentialize } = require('@grammyjs/runner');
 
 (function loadEnv() {
-  const envPath = path.join(__dirname, '.env');
-  if (!fs.existsSync(envPath)) return;
+  // .env ищем в двух местах: рядом с кодом (js/.env) и в корне проекта
+  // (../.env). Раньше смотрели только рядом с кодом, поэтому .env,
+  // положенный по инструкции в корень, молча не читался и бот падал
+  // с «Не задан BOT_TOKEN».
+  const candidates = [
+    path.join(__dirname, '.env'),
+    path.join(__dirname, '..', '.env')
+  ];
+
+  const envPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!envPath) return;
+
+  console.log(`Конфигурация: ${envPath}`);
 
   for (const rawLine of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -45,10 +56,20 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
 
 const SUB_PRICES = { days7: 25, days30: 75, days90: 150, premium: 300 };
 
+// DEBUG=true — подробный лог входящих обновлений и вызовов API
+const DEBUG = /^(1|true|yes|on)$/i.test(String(process.env.DEBUG || '').trim());
+
 const MAX_EXPORT_MB = envNumber('MAX_EXPORT_MB', 48);
 const MAX_SINGLE_MEDIA_MB = envNumber('MAX_SINGLE_MEDIA_MB', 35);
-const MAX_IMPORT_MB = envNumber('MAX_IMPORT_MB', 50);
-const MAX_IMPORT_FILE_MB = envNumber('MAX_IMPORT_FILE_MB', 200);
+// MAX_IMPORT_MB — устаревшее имя лимита импорта. Действует
+// MAX_IMPORT_FILE_MB (по умолчанию 200). Если задан только старый ключ,
+// подхватываем его, чтобы старые .env не теряли настройку.
+const MAX_IMPORT_MB = envNumber('MAX_IMPORT_MB', 0);
+const MAX_IMPORT_FILE_MB = envNumber(
+  process.env.MAX_IMPORT_FILE_MB ? 'MAX_IMPORT_FILE_MB' : 'MAX_IMPORT_MB',
+  MAX_IMPORT_MB || 200
+);
+
 const MAX_IMPORTED_MEDIA_MB = envNumber('MAX_IMPORTED_MEDIA_MB', 100);
 
 const MEDIA_DIR = path.join(__dirname, 'media_cache');
@@ -83,7 +104,44 @@ const bot = new Bot(BOT_TOKEN, { client: { apiRoot: API_BASE } });
 
 const botInfo = {};
 
-bot.use(sequentialize((ctx) => String(ctx.chat?.id ?? ctx.from?.id)));
+// Обновления одного владельца обрабатываем строго по порядку.
+//
+// Без этого переписка ломается: business_connection, business_message и
+// deleted_business_messages приходят пачкой и обрабатываются конкурентно.
+// Владелец ещё неизвестен, удаление приходит раньше сохранения сообщения —
+// и перехват молча ничего не присылает. Ключ — владелец подключения, чтобы
+// все события одной переписки выстроились в очередь, а разные люди друг
+// друга не блокировали.
+bot.use(
+  sequentialize((ctx) => {
+    // Все события одной переписки должны идти строго по порядку:
+    // подключение → сообщения → правки → удаления, и только потом
+    // действия владельца (нажатия в меню, которые могут выключить
+    // уведомления). Если ключи разные, нажатие «выключить» обгоняет
+    // удаление, и бот молча не присылает перехват.
+    //
+    // Ключ — владелец: у business-событий его берём из подключения,
+    // у нажатий в меню владельца — из ctx.from.
+    const connectionId =
+      ctx.businessConnectionId ||
+      (ctx.businessConnection && ctx.businessConnection.id) ||
+      (ctx.businessMessage && ctx.businessMessage.business_connection_id) ||
+      (ctx.editedBusinessMessage && ctx.editedBusinessMessage.business_connection_id) ||
+      (ctx.deletedBusinessMessages && ctx.deletedBusinessMessages.business_connection_id);
+
+    if (connectionId) {
+      // владелец подключения: из базы, иначе — из самого обновления
+      const owner =
+        ctx.businessConnection && ctx.businessConnection.user_chat_id;
+
+      if (owner) return `owner:${owner}`;
+
+      return `conn:${connectionId}`;
+    }
+
+    return `chat:${ctx.chat?.id ?? ctx.from?.id}`;
+  })
+);
 
 const RETRYABLE_ERROR = /DOCUMENT_INVALID|BUTTON_ICON_INVALID|CUSTOM_EMOJI/i;
 const RETRY_METHODS = new Set([
@@ -94,82 +152,56 @@ const RETRY_METHODS = new Set([
   'sendMediaGroup'
 ]);
 
-// Если Telegram один раз отказал на кастомные эмодзи — он откажет и дальше
-// (право на них не появляется «на лету»). Кэшируем отказ, чтобы не делать
-// по три неудачных попытки на каждый экран: меню уходит сразу без эмодзи.
-let customEmojiAllowed = true;
-
-function stripKeyboardEmojis(markup) {
-  let value = markup;
-
-  if (typeof value === 'string') {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      return markup;
-    }
-  }
-
-  if (!value || !Array.isArray(value.inline_keyboard)) return markup;
-
-  return {
-    ...value,
-    inline_keyboard: value.inline_keyboard.map((row) =>
-      row.map((button) => {
-        const { icon_custom_emoji_id, ...rest } = button;
-        return rest;
-      })
-    )
-  };
-}
-
+// Убирает кастомные эмодзи из текста (<tg-emoji ...>…</tg-emoji> → обычный символ)
+// и из кнопок (icon_custom_emoji_id). Нужно только для аварийного повтора,
+// когда Telegram отказался принимать сообщение с эмодзи.
 function stripTextEmojis(payload) {
-  const result = { ...payload };
+  const next = { ...payload };
 
-  if (typeof result.text === 'string') {
-    result.text = result.text.replace(
-      /<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/gi,
+  for (const field of ['text', 'caption']) {
+    if (typeof next[field] !== 'string') continue;
+
+    next[field] = next[field].replace(
+      /<tg-emoji\s+emoji-id="[^"]*">([^<]*)<\/tg-emoji>/g,
       '$1'
     );
   }
 
-  if (Array.isArray(result.entities)) {
-    result.entities = result.entities.filter(
-      (entity) => entity.type !== 'custom_emoji'
-    );
-  }
-
-  return result;
+  return next;
 }
 
-bot.api.config.use(async (prev, method, payload, signal) => {
-  // эмодзи уже отключены — сразу отправляем чистый вариант
-  let current = payload;
+function stripKeyboardEmojis(markup) {
+  if (!markup || !Array.isArray(markup.inline_keyboard)) return markup;
 
-  if (!customEmojiAllowed && RETRY_METHODS.has(method)) {
-    const stripped = stripTextEmojis(payload);
+  const clone = JSON.parse(JSON.stringify(markup));
 
-    if (stripped.reply_markup) {
-      stripped.reply_markup = stripKeyboardEmojis(stripped.reply_markup);
+  for (const row of clone.inline_keyboard) {
+    for (const button of row) {
+      delete button.icon_custom_emoji_id;
     }
-
-    current = stripped;
   }
 
-  let response = await prev(method, current, signal);
+  return clone;
+}
+
+// Кастомные эмодзи включены ВСЕГДА. Отключения нет по решению владельца:
+// у его аккаунта есть Telegram Premium, поэтому право на эмодзи есть.
+// Если Telegram когда-нибудь ответит DOCUMENT_INVALID, бот попробует
+// отправить без эмодзи ОДИН раз, чтобы меню дошло, но режим не запоминает
+// отказ и в следующий раз снова шлёт эмодзи.
+
+bot.api.config.use(async (prev, method, payload, signal) => {
+  let response = await prev(method, payload, signal);
 
   if (response.ok || !RETRY_METHODS.has(method)) return response;
   if (!RETRYABLE_ERROR.test(response.description || '')) return response;
 
-  // запоминаем: дальше без эмодзи
-  if (customEmojiAllowed) {
-    customEmojiAllowed = false;
-    console.warn(
-      '[Custom Emoji] Telegram отклонил кастомные эмодзи ' +
-        '(нужен Premium у владельца бота или юзернейм с Fragment). ' +
-        'Переключаюсь на обычные — меню продолжит работать.'
-    );
-  }
+  // Telegram отказал. Пробуем дослать без эмодзи, чтобы меню не потерялось,
+  // но ничего не запоминаем: следующая отправка снова будет с эмодзи.
+  console.warn(
+    `[Custom Emoji] ${method}: ${response.description}. ` +
+      'Повторяю без эмодзи, чтобы сообщение дошло.'
+  );
 
   const variants = [
     { keyboard: true, text: false },
@@ -178,7 +210,7 @@ bot.api.config.use(async (prev, method, payload, signal) => {
   ];
 
   for (const variant of variants) {
-    let next = { ...current };
+    let next = { ...payload };
 
     if (variant.keyboard && next.reply_markup) {
       next.reply_markup = stripKeyboardEmojis(next.reply_markup);
@@ -309,11 +341,8 @@ async function stopBot() {
 module.exports = {
   bot,
   botInfo,
+  DEBUG,
   API_BASE,
-  isCustomEmojiAllowed: () => customEmojiAllowed,
-  resetCustomEmojiCache: () => {
-    customEmojiAllowed = true;
-  },
   BOT_TOKEN,
   ADMIN_IDS,
   SUB_PRICES,

@@ -18,15 +18,48 @@ const keys = require('../menuKeys');
 let passed = 0;
 let failed = 0;
 
+// Асинхронные тесты запускаются строго по очереди и только в конце:
+// они меняют общую заглушку базы, параллельный запуск перетирал бы её.
+const asyncQueue = [];
+
+function testAsync(name, fn) {
+  asyncQueue.push(async () => {
+    try {
+      await fn();
+      passed++;
+      console.log(`  ✔ ${name}`);
+    } catch (error) {
+      failed++;
+      console.log(`  ✘ ${name}`);
+      console.log(`      ${error.message}`);
+    }
+  });
+}
+
 function test(name, fn) {
-  try {
-    fn();
+  const record = (error) => {
+    if (error) {
+      failed++;
+      console.log(`  ✘ ${name}`);
+      console.log(`      ${error.message}`);
+      return;
+    }
+
     passed++;
     console.log(`  ✔ ${name}`);
+  };
+
+  try {
+    const result = fn();
+
+    if (result && typeof result.then === 'function') {
+      record(new Error('async-тест объявлен через test() — используйте testAsync()'));
+      return;
+    }
+
+    record(null);
   } catch (error) {
-    failed++;
-    console.log(`  ✘ ${name}`);
-    console.log(`      ${error.message}`);
+    record(error);
   }
 }
 
@@ -286,6 +319,151 @@ test('админка: баннер adminmenu.jpg и статистика', () =>
   assert.ok(menu.text.includes('<b>10</b>'), 'нет цифры пользователей');
 });
 
+// --- замена меню: главная защита от дублей -------------------------------
+
+function fakeApi({ business = null, deleteFails = null } = {}) {
+  const deleted = [];
+  const sent = [];
+
+  // Заглушку базы ставим в момент запуска теста, а не при его объявлении:
+  // async-тесты выполняются позже, и «последний объявленный» перетёр бы
+  // настройку всех остальных.
+  const activate = () => {
+    dbStub.getBusinessConnectionByOwner = () => business;
+  };
+
+  const api = {
+    deleteMessage: async (payload) => {
+      // как настоящий Telegram: в Business-чате без business_connection_id
+      // сообщение не удаляется
+      const active = business && Number(business.is_enabled) === 1;
+
+      if (active && !payload.business_connection_id) {
+        const error = new Error("Bad Request: message can't be deleted");
+        error.description = "Bad Request: message can't be deleted";
+        throw error;
+      }
+
+      if (deleteFails) throw deleteFails;
+
+      deleted.push({
+        chatId: payload.chat_id,
+        messageId: payload.message_id,
+        conn: payload.business_connection_id
+      });
+      return true;
+    },
+    sendMessage: async (chatId, text, options = {}) => {
+      sent.push({ chatId, text, conn: options.business_connection_id });
+      return { message_id: 500, chat: { id: chatId }, text };
+    },
+    sendPhoto: async () => {
+      throw new Error('баннер в тесте не отправляется');
+    }
+  };
+
+  return { api, deleted, sent, activate };
+}
+
+const MENU = { text: 'Тестовое меню', banner: null, reply_markup: { inline_keyboard: [] } };
+
+testAsync('Business: удаление идёт с business_connection_id (нет дублей)', async () => {
+  const { api, deleted, sent, activate } = fakeApi({
+    business: { user_id: 900, connection_id: 'conn-abc', is_enabled: 1 }
+  });
+  activate();
+
+  await menus.replaceMenu({ api }, 900, 11, MENU, { business_connection_id: 'conn-abc' });
+
+  assert.strictEqual(deleted.length, 1, 'старое меню не удалено — будут дубли');
+  assert.strictEqual(deleted[0].messageId, 11);
+  assert.strictEqual(
+    deleted[0].conn,
+    'conn-abc',
+    'deleteMessage ушёл без business_connection_id — в Business-чате не сработает'
+  );
+  assert.strictEqual(sent.length, 1, 'новое меню не отправлено');
+});
+
+testAsync('Business-чат клиента: connection_id берётся из обновления, не из базы', async () => {
+  // база знает только владельца 900; чат клиента 555 — другое лицо
+  const { api, deleted, sent, activate } = fakeApi({
+    business: { user_id: 900, connection_id: 'conn-abc', is_enabled: 1 }
+  });
+  activate();
+
+  await menus.replaceMenu({ api }, 555, 21, MENU, { business_connection_id: 'conn-abc' });
+
+  assert.strictEqual(deleted.length, 1, 'старое меню в чате клиента не удалено');
+  assert.strictEqual(
+    deleted[0].conn,
+    'conn-abc',
+    'удаление в чате клиента ушло без business_connection_id — будут дубли'
+  );
+  assert.strictEqual(sent[0].conn, 'conn-abc', 'новое меню в чате клиента без connection_id');
+});
+
+testAsync('вне Business: обычное удаление без connection_id', async () => {
+  const { api, deleted, sent, activate } = fakeApi({ business: null });
+  activate();
+
+  await menus.replaceMenu({ api }, 901, 12, MENU);
+
+  assert.strictEqual(deleted.length, 1);
+  assert.strictEqual(deleted[0].messageId, 12);
+  assert.strictEqual(deleted[0].conn, undefined, 'лишний business_connection_id');
+  assert.strictEqual(sent.length, 1);
+});
+
+testAsync('Business отключён: шлём и удаляем как обычный чат', async () => {
+  const { api, deleted, sent, activate } = fakeApi({
+    business: { user_id: 903, connection_id: 'conn-off', is_enabled: 0 }
+  });
+  activate();
+
+  await menus.replaceMenu({ api }, 903, 14, MENU);
+
+  assert.strictEqual(deleted.length, 1);
+  assert.strictEqual(deleted[0].conn, undefined);
+  assert.strictEqual(sent[0].conn, undefined);
+});
+
+testAsync('пропавшее сообщение: ошибка не мешает отправке нового', async () => {
+  const err = new Error('Bad Request: message to delete not found');
+  err.description = 'Bad Request: message to delete not found';
+
+  const { api, sent, activate } = fakeApi({ business: null, deleteFails: err });
+  activate();
+
+  await menus.replaceMenu({ api }, 902, 13, MENU);
+
+  assert.strictEqual(sent.length, 1, 'новое меню не отправлено после «not found»');
+});
+
+testAsync('меню не дублируется: 5 переходов → 5 удалений и 5 отправок', async () => {
+  const { api, deleted, sent, activate } = fakeApi({
+    business: { user_id: 904, connection_id: 'conn-x', is_enabled: 1 }
+  });
+  activate();
+
+  let currentId = 100;
+
+  for (let step = 0; step < 5; step++) {
+    const msg = await menus.replaceMenu({ api }, 904, currentId, MENU, {
+      business_connection_id: 'conn-x'
+    });
+
+    currentId = msg.message_id;
+  }
+
+  assert.strictEqual(deleted.length, 5, `удалено ${deleted.length}, ожидалось 5`);
+  assert.strictEqual(sent.length, 5, `отправлено ${sent.length}, ожидалось 5`);
+  assert.ok(
+    deleted.every((call) => call.conn === 'conn-x'),
+    'хотя бы одно удаление без business_connection_id'
+  );
+});
+
 test('архив: типы сообщений с переключателями', () => {
   const menu = menus.getArchiveTypesMenu('555', 'Собеседник', new Set(['text', 'photo']));
   const buttons = menu.reply_markup.inline_keyboard.flat();
@@ -314,5 +492,9 @@ test('формат даты подписки', () => {
 
 if (realDb) require.cache[dbPath] = realDb;
 
-console.log(`\nИтого: ${passed} прошло, ${failed} упало\n`);
-process.exit(failed === 0 ? 0 : 1);
+(async () => {
+  for (const run of asyncQueue) await run();
+
+  console.log(`\nИтого: ${passed} прошло, ${failed} упало\n`);
+  process.exit(failed === 0 ? 0 : 1);
+})();

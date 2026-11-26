@@ -10,7 +10,7 @@ Telegram-бот для работы с **Telegram Business**: сохраняет
 ```bash
 cd js
 npm install
-cp ../.env.example ../.env    # вписать BOT_TOKEN и ADMIN_IDS
+cp ../.env.example js/.env    # вписать BOT_TOKEN и ADMIN_IDS
 npm start
 ```
 

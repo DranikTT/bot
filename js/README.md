@@ -12,12 +12,16 @@ Telegram Desktop.
 ```bash
 cd js
 npm install
-cp ../.env.example ../.env     # вписать BOT_TOKEN и ADMIN_IDS
+cp ../.env.example .env        # вписать BOT_TOKEN и ADMIN_IDS
 npm start
 ```
 
 Нужен Node.js **22.5+** (используется встроенный `node:sqlite`) и Python 3
 только для тестов.
+
+`.env` ищется в двух местах: `js/.env` (рекомендуется) и корень проекта.
+Раньше читался только первый, и файл, положенный в корень по инструкции,
+молча игнорировался.
 
 ## Зависимости
 
