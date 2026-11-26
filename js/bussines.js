@@ -243,7 +243,7 @@ async function downloadTelegramFile(fileId, prefix = 'media', mediaType = 'docum
 
     const localPath = path.join(MEDIA_DIR, localName);
     const encodedFilePath = encodeURI(fileInfo.file_path).replace(/#/g, '%23');
-    const fileUrl = `https://api.telegram.org/file/bot${bot.token}/${encodedFilePath}`;
+    const fileUrl = `${config.API_BASE}/file/bot${bot.token}/${encodedFilePath}`;
 
     return await new Promise((resolve, reject) => {
       let settled = false;

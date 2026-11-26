@@ -461,7 +461,8 @@ async function downloadFileToDisk(fileId, destinationPath, maxBytes) {
     await fs.promises.copyFile(file.file_path, destinationPath);
     return destinationPath;
   }
-  const url = `https://api.telegram.org/file/bot${config.BOT_TOKEN}/${encodeURI(file.file_path)}`;
+  // через API_BASE: на локальном Bot API адрес другой
+  const url = `${config.API_BASE}/file/bot${config.BOT_TOKEN}/${encodeURI(file.file_path)}`;
   const response = await fetch(url);
   if (!response.ok || !response.body) throw new Error(`Ошибка загрузки файла: HTTP ${response.status}`);
   await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(destinationPath));

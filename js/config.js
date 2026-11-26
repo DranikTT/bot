@@ -76,7 +76,10 @@ const API_BASE = process.env.API_SERVER
   ? String(process.env.API_SERVER).replace(/\/+$/, '')
   : 'https://api.telegram.org';
 
-const bot = new Bot(BOT_TOKEN, { client: { apiRoot: `${API_BASE}/bot` } });
+// ВАЖНО: grammy сам добавляет к apiRoot путь /bot<token>/<method>.
+// Если передать сюда `${API_BASE}/bot`, получится /bot/bot<token>/getMe,
+// и Telegram ответит 404 Not Found (именно так падал запуск).
+const bot = new Bot(BOT_TOKEN, { client: { apiRoot: API_BASE } });
 
 const botInfo = {};
 

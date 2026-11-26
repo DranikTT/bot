@@ -109,7 +109,28 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_POST(self) -> None:
-        method = self.path.rsplit("/", 1)[-1]
+        # Проверяем ПУТЬ ЦЕЛИКОМ, как настоящий Telegram: /bot<token>/<method>.
+        # Раньше метод брался как последний сегмент, и двойной /bot/bot<token>/
+        # проходил незамеченным — боевой 404 на getMe тесты не ловили.
+        path = self.path.split("?")[0]
+        parts = [part for part in path.split("/") if part]
+
+        if len(parts) < 2 or not parts[0].startswith("bot") or len(parts[0]) < 5:
+            return self._send({
+                "ok": False,
+                "error_code": 404,
+                "description": "Not Found",
+            }, status=404)
+
+        if parts[0] == "bot":
+            # ровно то, что случилось в проде: /bot/bot<token>/getMe
+            return self._send({
+                "ok": False,
+                "error_code": 404,
+                "description": "Not Found",
+            }, status=404)
+
+        method = parts[-1]
         payload = self._payload()
 
         with LOCK:
@@ -148,9 +169,9 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._send({"ok": True, "result": True})
 
-    def _send(self, body: dict) -> None:
+    def _send(self, body: dict, status: int = 200) -> None:
         raw = json.dumps(body).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()

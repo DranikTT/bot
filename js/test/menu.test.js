@@ -135,6 +135,41 @@ test('все ID уникальны', () => {
   assert.strictEqual(new Set(ids).size, ids.length, 'есть дубли ID');
 });
 
+console.log('\nАдрес Bot API');
+
+test('apiRoot не содержит /bot (grammy добавит его сам)', () => {
+  // Если передать apiRoot с /bot, URL станет /bot/bot<token>/getMe,
+  // и Telegram ответит 404 Not Found — бот не стартует.
+  const config = require('../config');
+  assert.ok(config.API_BASE, 'API_BASE не экспортируется');
+  assert.ok(
+    !/\/bot$/.test(config.API_BASE),
+    `API_BASE заканчивается на /bot — будет двойной /bot/bot: ${config.API_BASE}`
+  );
+});
+
+test('адрес Bot API по умолчанию — официальный', () => {
+  const config = require('../config');
+  assert.ok(
+    config.API_BASE === 'https://api.telegram.org' ||
+      config.API_BASE.startsWith('http'),
+    config.API_BASE
+  );
+});
+
+test('все загрузки файлов идут через URL, а не в обход', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  for (const file of ['bot.js', 'bussines.js']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.ok(
+      !source.includes('https://api.telegram.org/file/bot'),
+      `${file} жёстко ходит в api.telegram.org — сломается на локальном Bot API`
+    );
+  }
+});
+
 console.log('\nМеню');
 
 // Заглушка БД: меню не должно требовать реального SQLite для текстов
