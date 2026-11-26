@@ -104,7 +104,44 @@ const bot = new Bot(BOT_TOKEN, { client: { apiRoot: API_BASE } });
 
 const botInfo = {};
 
-bot.use(sequentialize((ctx) => String(ctx.chat?.id ?? ctx.from?.id)));
+// Обновления одного владельца обрабатываем строго по порядку.
+//
+// Без этого переписка ломается: business_connection, business_message и
+// deleted_business_messages приходят пачкой и обрабатываются конкурентно.
+// Владелец ещё неизвестен, удаление приходит раньше сохранения сообщения —
+// и перехват молча ничего не присылает. Ключ — владелец подключения, чтобы
+// все события одной переписки выстроились в очередь, а разные люди друг
+// друга не блокировали.
+bot.use(
+  sequentialize((ctx) => {
+    // Все события одной переписки должны идти строго по порядку:
+    // подключение → сообщения → правки → удаления, и только потом
+    // действия владельца (нажатия в меню, которые могут выключить
+    // уведомления). Если ключи разные, нажатие «выключить» обгоняет
+    // удаление, и бот молча не присылает перехват.
+    //
+    // Ключ — владелец: у business-событий его берём из подключения,
+    // у нажатий в меню владельца — из ctx.from.
+    const connectionId =
+      ctx.businessConnectionId ||
+      (ctx.businessConnection && ctx.businessConnection.id) ||
+      (ctx.businessMessage && ctx.businessMessage.business_connection_id) ||
+      (ctx.editedBusinessMessage && ctx.editedBusinessMessage.business_connection_id) ||
+      (ctx.deletedBusinessMessages && ctx.deletedBusinessMessages.business_connection_id);
+
+    if (connectionId) {
+      // владелец подключения: из базы, иначе — из самого обновления
+      const owner =
+        ctx.businessConnection && ctx.businessConnection.user_chat_id;
+
+      if (owner) return `owner:${owner}`;
+
+      return `conn:${connectionId}`;
+    }
+
+    return `chat:${ctx.chat?.id ?? ctx.from?.id}`;
+  })
+);
 
 const RETRYABLE_ERROR = /DOCUMENT_INVALID|BUTTON_ICON_INVALID|CUSTOM_EMOJI/i;
 const RETRY_METHODS = new Set([

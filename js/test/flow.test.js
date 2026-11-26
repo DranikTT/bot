@@ -347,10 +347,139 @@ test('личный чат владельца не ломается (удален
   assert.strictEqual(keys.EMOJI.star, '5879785854284599288');
 });
 
+// --- перехват переписки: отдельный прогон ---------------------------------
+//
+// Меню и перехват проверяются разными прогонами: в одном сценарии они
+// конкурируют за порядок обновлений, и тест становится нестабильным.
+// Здесь всё как в жизни: подключение → переписка → удаления.
+async function runLive() {
+  const { spawn: spawnAsync } = require('child_process');
+  const fakePort = String(Number(PORT) + 1);
+
+  const fakeProc = spawnAsync('python3', [path.join(__dirname, 'fake_api.py')], {
+    env: { ...env, FAKE_PORT: fakePort, LIVE: '1' },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let fakeOut = '';
+  let ready = false;
+
+  fakeProc.stdout.on('data', (chunk) => {
+    fakeOut += chunk.toString();
+    if (fakeOut.includes('fake Telegram API')) ready = true;
+  });
+
+  for (let attempt = 0; attempt < 100 && !ready; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  assert.ok(ready, `LIVE: фейковый сервер не поднялся: ${fakeOut}`);
+
+  const botProc = spawnAsync('node', [path.join(ROOT, 'bot.js')], {
+    env: { ...env, API_SERVER: `http://127.0.0.1:${fakePort}` },
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let botOut = '';
+  botProc.stdout.on('data', (chunk) => (botOut += chunk.toString()));
+  botProc.stderr.on('data', (chunk) => (botOut += chunk.toString()));
+
+  const finished = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 40000);
+    fakeProc.on('exit', () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+
+  botProc.kill('SIGTERM');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  assert.ok(finished, `LIVE: фейковый сервер не завершил сценарий. ${botOut.slice(0, 500)}`);
+
+  return JSON.parse(fakeOut.slice(fakeOut.indexOf('[')));
+}
+
+function runLiveTests(liveCalls) {
+  const notices = [
+    ...liveCalls.filter((c) => c.method === 'sendMessage' || c.method === 'sendPhoto')
+  ].filter((call) => {
+    const body = String(call.payload.text || call.payload.caption || '')
+      .replace(/<[^>]+>/g, '');
+    return /Удалённое сообщение|Изменённое сообщение/.test(body);
+  });
+
+  const plain = notices.map((call) =>
+    String(call.payload.text || call.payload.caption || '').replace(/<[^>]+>/g, '')
+  );
+
+  test('перехват: владельцу пришло уведомление об удалённом', () => {
+    assert.ok(
+      plain.some((text) => /Удалённое сообщение/.test(text)),
+      'об удалённом сообщении не уведомили'
+    );
+    assert.ok(
+      plain.some((text) => /Секретик/.test(text)),
+      `в уведомлении нет текста удалённого: ${plain.join(' / ').slice(0, 200)}`
+    );
+  });
+
+  test('перехват: уведомление об изменённом содержит старый и новый текст', () => {
+    const body = plain.find((text) => /Изменённое сообщение/.test(text));
+
+    assert.ok(body, 'об изменённом сообщении не уведомили');
+    assert.ok(/Привет, как дела\?/.test(body), `нет старого текста: ${body.slice(0, 200)}`);
+    assert.ok(/делишки/.test(body), `нет нового текста: ${body.slice(0, 200)}`);
+  });
+
+  test('перехват: удалённое фото приходит владельцу файлом', () => {
+    const photos = liveCalls.filter((call) => {
+      if (call.method !== 'sendPhoto') return false;
+      const body = String(call.payload.caption || '').replace(/<[^>]+>/g, '');
+      return /Удалённое сообщение/.test(body);
+    });
+
+    assert.ok(
+      photos.length > 0,
+      'самоудаляющееся фото не переслано — оно исчезло вместе с чатом'
+    );
+  });
+
+  test('перехват: сообщение сохранено в базу с owner_id владельца', () => {
+    const { DatabaseSync } = require('node:sqlite');
+    const store = new DatabaseSync(DB_PATH);
+    const rows = store.prepare('SELECT owner_id, is_deleted, is_self_destruct, local_path FROM messages').all();
+    store.close();
+
+    assert.ok(rows.length > 0, 'ни одно сообщение не сохранено');
+    assert.ok(
+      rows.every((row) => Number(row.owner_id) > 0),
+      'у сообщений не определён владелец'
+    );
+    assert.ok(
+      rows.some((row) => row.is_deleted === 1),
+      'удаление не отмечено в базе'
+    );
+    assert.ok(
+      rows.some((row) => row.local_path),
+      'медиа самоудаляющегося не сохранено на диск'
+    );
+  });
+}
+
 runScenario()
   .then((result) => {
     calls = result.calls;
     scenarioDone = true;
+
+    if (process.env.SHOW_CALLS) {
+      console.log('\n--- ВЫЗОВЫ ---');
+      for (const c of calls) {
+        const body = String(c.payload.text || c.payload.caption || '').replace(/<[^>]+>/g, '').replace(/\n/g, '|').slice(0, 45);
+        console.log(c.method, c.payload.chat_id, body);
+      }
+    }
 
     // проверки объявлены выше и вызываются здесь, когда данные уже есть
     for (const [name, fn] of pendingTests) {
@@ -361,7 +490,10 @@ runScenario()
       fs.unlinkSync(DB_PATH);
     } catch (_) {}
 
-    finish();
+    return runLive().then((liveCalls) => {
+      runLiveTests(liveCalls);
+      finish();
+    });
   })
   .catch((error) => {
     console.log(`\n  ✘ Сценарий не отработал: ${error.message}\n`);
