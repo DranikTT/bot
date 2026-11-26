@@ -1,0 +1,19 @@
+{
+  "name": "savemod-bot",
+  "version": "1.0.0",
+  "description": "Telegram Business bot: перехват удалённых/изменённых сообщений, HTML-архивы",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@grammyjs/runner": "^2.0.3",
+    "grammy": "^1.30.0"
+  },
+  "license": "MIT",
+  "private": true
+}

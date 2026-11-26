@@ -7,7 +7,7 @@ const { InputFile, InlineKeyboard } = require('grammy');
 const config = require('./config');
 
 const db = require('./database');
-const { cleanPath, writeChatHtmlArchive } = require('./archive');
+const { cleanPath } = require('./archive');
 
 const bot = config.bot;
 const api = bot.api;
@@ -399,7 +399,7 @@ async function onDeletedBusinessMessages(ctx) {
     if (!del || !del.message_ids) return;
 
     if (typeof db.markMessagesDeleted === 'function') {
-      db.markMessagesDeleted(del.chat.id, del.message_ids);
+      db.markMessagesDeleted(del.chat.id, del.message_ids, del.business_connection_id);
     }
   } catch (error) {
     console.error('[Deleted Business Messages Error]:', error);

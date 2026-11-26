@@ -2,13 +2,66 @@
 
 const path = require('path');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 
-const db = new Database(path.join(__dirname, 'bot_database.sqlite'));
+// Встроенный в Node SQLite (>= 22.5): не требует нативной сборки,
+// поэтому npm install не тянет node-gyp и не зависит от сети.
+const DB_PATH = process.env.DATABASE_PATH
+  ? path.resolve(process.env.DATABASE_PATH)
+  : path.join(__dirname, 'bot_database.sqlite');
 
-db.pragma('journal_mode = WAL');
-db.pragma('synchronous = NORMAL');
-db.pragma('busy_timeout = 5000');
+const rawDb = new DatabaseSync(DB_PATH);
+
+rawDb.exec('PRAGMA journal_mode = WAL');
+rawDb.exec('PRAGMA synchronous = NORMAL');
+rawDb.exec('PRAGMA busy_timeout = 5000');
+
+/**
+ * Обёртка над node:sqlite с API better-sqlite3.
+ * Отличия: класс возвращает объекты с null-prototype, а better-sqlite3 —
+ * обычные. Для остального кода это неважно, но JSON.stringify одинаков.
+ */
+const db = {
+  exec(sql) {
+    return rawDb.exec(sql);
+  },
+
+  prepare(sql) {
+    const statement = rawDb.prepare(sql);
+
+    return {
+      all(...params) {
+        return statement.all(...params);
+      },
+      get(...params) {
+        return statement.get(...params);
+      },
+      run(...params) {
+        return statement.run(...params);
+      }
+    };
+  },
+
+  pragma(expression) {
+    rawDb.exec(`PRAGMA ${expression}`);
+  },
+
+  transaction(fn) {
+    return (...args) => {
+      rawDb.exec('BEGIN');
+      try {
+        const result = fn(...args);
+        rawDb.exec('COMMIT');
+        return result;
+      } catch (error) {
+        try {
+          rawDb.exec('ROLLBACK');
+        } catch (_) {}
+        throw error;
+      }
+    };
+  }
+};
 
 const SECRET_SEED =
   process.env.DB_ENCRYPTION_KEY ||
@@ -452,14 +505,233 @@ function getAllUsers() {
   return db.prepare('SELECT user_id as id, * FROM users').all();
 }
 
+
+/**
+ * Сохранение входящего/исходящего сообщения Business-чата.
+ *
+ * Раньше методы saveMessage/saveEditedMessage/markMessagesDeleted
+ * отсутствовали — bussines.js вызывал их через typeof-проверку, поэтому
+ * история молча не сохранялась: экспорт всегда показывал пустой список.
+ */
+function saveMessage(message) {
+  if (!message || !message.chat) return false;
+
+  const chatId = Number(message.chat.id);
+  const messageId = Number(message.message_id);
+  if (!Number.isSafeInteger(chatId) || !Number.isSafeInteger(messageId)) return false;
+
+  const from = message.from || {};
+  const ownerId = Number(message.business_connection_id ? resolveOwnerId(message) : from.id);
+  const senderId = Number(from.id) || 0;
+  const media = extractMedia(message);
+
+  const info = db
+    .prepare(
+      `INSERT INTO messages (
+         chat_id, message_id, connection_id, owner_id, sender_id,
+         sender_name, sender_username, peer_name, peer_username, text,
+         media_type, file_id, file_name, local_path, is_self_destruct,
+         is_deleted, date
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+       ON CONFLICT(chat_id, message_id) DO UPDATE SET
+         text = excluded.text,
+         media_type = excluded.media_type,
+         file_id = excluded.file_id,
+         file_name = excluded.file_name,
+         is_deleted = 0`
+    )
+    .run(
+      chatId,
+      messageId,
+      message.business_connection_id || '',
+      ownerId,
+      senderId,
+      encryptStr(from.first_name || ''),
+      encryptStr(from.username || ''),
+      encryptStr(peerTitle(message.chat)),
+      encryptStr(message.chat.username || ''),
+      encryptStr(message.text || message.caption || ''),
+      media.mediaType,
+      media.fileId,
+      encryptStr(media.fileName || ''),
+      null,
+      message.self_destruct_media ? 1 : 0,
+      Number(message.date) || Math.floor(Date.now() / 1000)
+    );
+
+  return info.changes > 0;
+}
+
+/// Владелец переписки: из business_connection_id через таблицу подключений.
+function resolveOwnerId(message) {
+  const connectionId = message.business_connection_id;
+  const senderId = Number((message.from && message.from.id) || 0);
+
+  if (connectionId) {
+    const connection = db
+      .prepare('SELECT user_id FROM business_connections WHERE connection_id = ?')
+      .get(connectionId);
+
+    if (connection && connection.user_id) return Number(connection.user_id);
+  }
+
+  // без подключения владельцем считаем отправителя: переписка личная
+  return senderId;
+}
+
+function peerTitle(chat) {
+  if (!chat) return '';
+  if (chat.title) return String(chat.title);
+
+  const name = [chat.first_name, chat.last_name].filter(Boolean).join(' ');
+  if (name) return name;
+  if (chat.username) return `@${chat.username}`;
+
+  return `Чат ${chat.id}`;
+}
+
+function extractMedia(message) {
+  if (Array.isArray(message.photo) && message.photo.length) {
+    const best = message.photo.reduce((largest, photo) =>
+      Number(photo.file_size || 0) > Number(largest.file_size || 0) ? photo : largest
+    );
+
+    return { mediaType: 'photo', fileId: best.file_id, fileName: '' };
+  }
+
+  for (const [key, type] of [
+    ['video', 'video'],
+    ['video_note', 'video_note'],
+    ['animation', 'animation'],
+    ['voice', 'voice'],
+    ['audio', 'audio'],
+    ['sticker', 'sticker'],
+    ['document', 'document']
+  ]) {
+    if (message[key]) {
+      return {
+        mediaType: type,
+        fileId: message[key].file_id,
+        fileName: message[key].file_name || ''
+      };
+    }
+  }
+
+  if (message.location) return { mediaType: 'location', fileId: null, fileName: '' };
+  if (message.contact) return { mediaType: 'contact', fileId: null, fileName: '' };
+
+  return { mediaType: null, fileId: null, fileName: '' };
+}
+
+function saveEditedMessage(message) {
+  if (!message || !message.chat) return false;
+
+  const chatId = Number(message.chat.id);
+  const messageId = Number(message.message_id);
+  if (!Number.isSafeInteger(chatId) || !Number.isSafeInteger(messageId)) return false;
+
+  const existing = db
+    .prepare('SELECT text, edit_history FROM messages WHERE chat_id = ? AND message_id = ?')
+    .get(chatId, messageId);
+
+  const newText = message.text || message.caption || '';
+
+  if (!existing) {
+    // правка пришла раньше сохранения — просто сохраняем как обычное
+    return saveMessage(message);
+  }
+
+  const oldText = decryptStr(existing.text);
+  const history = safeJsonArray(existing.edit_history);
+  history.push({ text: oldText, at: Math.floor(Date.now() / 1000) });
+
+  const info = db
+    .prepare('UPDATE messages SET text = ?, edit_history = ? WHERE chat_id = ? AND message_id = ?')
+    .run(
+      encryptStr(newText),
+      encryptStr(JSON.stringify(history)),
+      chatId,
+      messageId
+    );
+
+  return info.changes > 0;
+}
+
+function safeJsonArray(value) {
+  const text = decryptStr(value);
+  try {
+    const parsed = JSON.parse(text || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/// Помечает удалённые сообщения. ownerId необязателен, но если передан —
+/// удаление не заденет чужую переписку с тем же chat_id.
+function markMessagesDeleted(chatId, messageIds, ownerId = null) {
+  if (!Array.isArray(messageIds) || messageIds.length === 0) return 0;
+
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const params = [Number(chatId), ...messageIds.map(Number)];
+
+  let sql = `UPDATE messages SET is_deleted = 1 WHERE chat_id = ? AND message_id IN (${placeholders})`;
+  if (ownerId !== null) {
+    sql += ' AND owner_id = ?';
+    params.push(Number(ownerId));
+  }
+
+  const info = db.prepare(sql).run(...params);
+  return info.changes || 0;
+}
+
+/// Отредактированный текст уже сохранённого сообщения (для архива).
+function getEditedText(chatId, messageId) {
+  const row = db
+    .prepare('SELECT text FROM messages WHERE chat_id = ? AND message_id = ?')
+    .get(Number(chatId), Number(messageId));
+
+  return row ? decryptStr(row.text) : '';
+}
+
 function getOwnerChats(userId) {
   const uid = Number(userId);
 
-  return db
+  // заголовок берём из последнего сообщения чата: раньше его не было,
+  // и список чатов показывал голые ID
+  const rows = db
     .prepare(
-      'SELECT chat_id as chatId, COUNT(*) as msgCount FROM messages WHERE owner_id = ? GROUP BY chat_id'
+      `SELECT chat_id as chatId,
+              COUNT(*) as msgCount,
+              MAX(date) as lastDate
+         FROM messages
+        WHERE owner_id = ?
+        GROUP BY chat_id
+        ORDER BY lastDate DESC`
     )
     .all(uid);
+
+  return rows.map((row) => {
+    const last = db
+      .prepare(
+        `SELECT peer_name, peer_username
+           FROM messages
+          WHERE owner_id = ? AND chat_id = ? AND peer_name != ''
+          ORDER BY date DESC
+          LIMIT 1`
+      )
+      .get(uid, row.chatId);
+
+    return {
+      chatId: row.chatId,
+      chat_id: row.chatId,
+      msgCount: row.msgCount,
+      msg_count: row.msgCount,
+      peerName: last ? decryptStr(last.peer_name) : '',
+      peerUsername: last ? decryptStr(last.peer_username) : '',
+      chat_title: last ? decryptStr(last.peer_name) : ''
+    };
+  });
 }
 
 function getChatMessages(chatId, ownerId) {
@@ -492,6 +764,10 @@ module.exports = {
   getAllUsers,
   getOwnerChats,
   getChatMessages,
+  saveMessage,
+  saveEditedMessage,
+  markMessagesDeleted,
+  getEditedText,
   encryptStr,
   decryptStr
 };

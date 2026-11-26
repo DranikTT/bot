@@ -8,11 +8,16 @@ const db = require('./database');
 const { ADMIN_IDS, botInfo } = require('./config');
 const keys = require('./menuKeys');
 
+// Баннеры лежат в ../assets (общая папка репозитория).
+// Раньше путь вёл в несуществующую image/, поэтому меню всегда уходило
+// текстом, хотя картинки были на месте.
+const ASSETS_DIR = path.resolve(__dirname, '..', 'assets');
+
 const MENU_BANNERS = Object.freeze({
-  main: path.join(__dirname, 'image', 'mainmenu.jpg'),
-  admin: path.join(__dirname, 'image', 'adminmenu.jpg'),
-  subscription: path.join(__dirname, 'image', 'subscription.jpg'),
-  settings: path.join(__dirname, 'image', 'settings.jpg')
+  main: path.join(ASSETS_DIR, 'mainmenu.jpg'),
+  admin: path.join(ASSETS_DIR, 'adminmenu.jpg'),
+  subscription: path.join(ASSETS_DIR, 'subscription.jpg'),
+  settings: path.join(ASSETS_DIR, 'settings.jpg')
 });
 
 const ARCHIVE_TYPE_LABELS = Object.freeze({
@@ -220,10 +225,12 @@ function getArchiveTypesMenu(chatIdOrSession, chatTitle, selectedTypesSet) {
       const active = typeSet.has(type);
       const icon = active ? keys.EMOJI.check : keys.EMOJI.cross;
 
-      keyboard.text({
+      // callback_data — вторым аргументом: объектная форма text()
+      // в grammy подменяет данные текстом кнопки
+      keys.cbButton(keyboard, {
         text: `${active ? '✅' : '❌'} ${ARCHIVE_TYPE_LABELS[type]}`,
-        callback_data: `arch_toggle_${type}`,
-        icon_custom_emoji_id: icon,
+        data: `arch_toggle_${type}`,
+        emoji: icon,
         style: active ? 'success' : 'primary'
       });
     }
@@ -231,19 +238,18 @@ function getArchiveTypesMenu(chatIdOrSession, chatTitle, selectedTypesSet) {
     keyboard.row();
   }
 
-  keyboard
-    .text({
-      text: 'Отменить экспорт',
-      callback_data: 'arch_cancel',
-      icon_custom_emoji_id: keys.EMOJI.cross,
-      style: 'danger'
-    })
-    .text({
-      text: 'Начать экспорт',
-      callback_data: 'arch_start',
-      icon_custom_emoji_id: keys.EMOJI.check,
-      style: 'success'
-    });
+  keys.cbButton(keyboard, {
+    text: 'Отменить экспорт',
+    data: 'arch_cancel',
+    emoji: keys.EMOJI.cross,
+    style: 'danger'
+  });
+  keys.cbButton(keyboard, {
+    text: 'Начать экспорт',
+    data: 'arch_start',
+    emoji: keys.EMOJI.check,
+    style: 'success'
+  });
 
   const displayTitle =
     title || (chatId !== undefined && chatId !== null ? `Чат #${chatId}` : 'Чат');
@@ -362,6 +368,35 @@ function getAdminMenu() {
   return buildMenu(text, keyboard, 'admin');
 }
 
+/// Файл действительно картинка: проверяем сигнатуру, а не расширение.
+/// Битый или чужой файл не должен ронять отправку меню.
+function isImageFile(filePath) {
+  try {
+    const buffer = Buffer.alloc(12);
+    const fd = fs.openSync(filePath, 'r');
+    let read = 0;
+
+    try {
+      read = fs.readSync(fd, buffer, 0, 12, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    if (read < 4) return false;
+
+    const jpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    const png = buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const gif = buffer.subarray(0, 4).toString('ascii') === 'GIF8';
+    const webp =
+      buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+
+    return jpeg || png || gif || webp;
+  } catch {
+    return false;
+  }
+}
+
 function getMenuBanner(type) {
   return MENU_BANNERS[type] || null;
 }
@@ -452,7 +487,9 @@ async function sendMenu(botOrApi, chatId, menu, options = {}) {
   }
 
   const bannerKey = menu.bannerKey;
-  const bannerExists = menu.banner ? fs.existsSync(menu.banner) : false;
+  const bannerExists = menu.banner
+    ? fs.existsSync(menu.banner) && isImageFile(menu.banner)
+    : false;
 
   if (isConnected && conn.connection_id) {
     sendOptions.business_connection_id = conn.connection_id;
@@ -530,6 +567,8 @@ module.exports = {
 
   getAdminMenu,
   getMenuBanner,
+  isImageFile,
+  MENU_BANNERS,
 
   sendMenu,
   replaceMenu

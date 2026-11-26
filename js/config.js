@@ -70,14 +70,31 @@ const ALLOWED_UPDATES = [
   'pre_checkout_query'
 ];
 
-const bot = new Bot(BOT_TOKEN);
+// API_SERVER нужен для локального Bot API и офлайн-тестов.
+// Без него бот всегда шёл в api.telegram.org и на тестах просто висел.
+const API_BASE = process.env.API_SERVER
+  ? String(process.env.API_SERVER).replace(/\/+$/, '')
+  : 'https://api.telegram.org';
+
+const bot = new Bot(BOT_TOKEN, { client: { apiRoot: `${API_BASE}/bot` } });
 
 const botInfo = {};
 
 bot.use(sequentialize((ctx) => String(ctx.chat?.id ?? ctx.from?.id)));
 
 const RETRYABLE_ERROR = /DOCUMENT_INVALID|BUTTON_ICON_INVALID|CUSTOM_EMOJI/i;
-const RETRY_METHODS = new Set(['sendMessage', 'editMessageText']);
+const RETRY_METHODS = new Set([
+  'sendMessage',
+  'editMessageText',
+  'sendPhoto',
+  'sendDocument',
+  'sendMediaGroup'
+]);
+
+// Если Telegram один раз отказал на кастомные эмодзи — он откажет и дальше
+// (право на них не появляется «на лету»). Кэшируем отказ, чтобы не делать
+// по три неудачных попытки на каждый экран: меню уходит сразу без эмодзи.
+let customEmojiAllowed = true;
 
 function stripKeyboardEmojis(markup) {
   let value = markup;
@@ -123,10 +140,33 @@ function stripTextEmojis(payload) {
 }
 
 bot.api.config.use(async (prev, method, payload, signal) => {
-  let response = await prev(method, payload, signal);
+  // эмодзи уже отключены — сразу отправляем чистый вариант
+  let current = payload;
+
+  if (!customEmojiAllowed && RETRY_METHODS.has(method)) {
+    const stripped = stripTextEmojis(payload);
+
+    if (stripped.reply_markup) {
+      stripped.reply_markup = stripKeyboardEmojis(stripped.reply_markup);
+    }
+
+    current = stripped;
+  }
+
+  let response = await prev(method, current, signal);
 
   if (response.ok || !RETRY_METHODS.has(method)) return response;
   if (!RETRYABLE_ERROR.test(response.description || '')) return response;
+
+  // запоминаем: дальше без эмодзи
+  if (customEmojiAllowed) {
+    customEmojiAllowed = false;
+    console.warn(
+      '[Custom Emoji] Telegram отклонил кастомные эмодзи ' +
+        '(нужен Premium у владельца бота или юзернейм с Fragment). ' +
+        'Переключаюсь на обычные — меню продолжит работать.'
+    );
+  }
 
   const variants = [
     { keyboard: true, text: false },
@@ -135,7 +175,7 @@ bot.api.config.use(async (prev, method, payload, signal) => {
   ];
 
   for (const variant of variants) {
-    let next = { ...payload };
+    let next = { ...current };
 
     if (variant.keyboard && next.reply_markup) {
       next.reply_markup = stripKeyboardEmojis(next.reply_markup);
@@ -219,7 +259,7 @@ async function downloadFileBuffer(fileId, maxBytes = Infinity) {
     throw new Error('Файл слишком большой.');
   }
 
-  const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${encodeURI(file.file_path)}`;
+  const url = `${API_BASE}/file/bot${BOT_TOKEN}/${encodeURI(file.file_path)}`;
   const response = await fetch(url);
 
   if (!response.ok) {
@@ -266,6 +306,11 @@ async function stopBot() {
 module.exports = {
   bot,
   botInfo,
+  API_BASE,
+  isCustomEmojiAllowed: () => customEmojiAllowed,
+  resetCustomEmojiCache: () => {
+    customEmojiAllowed = true;
+  },
   BOT_TOKEN,
   ADMIN_IDS,
   SUB_PRICES,
